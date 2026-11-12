@@ -118,8 +118,12 @@ const SONGS = [
 const ORDER = [2, 0, 1, 3, 4, 5];
 let BEST = {};
 try { BEST = JSON.parse(localStorage.getItem('zvukach_best') || '{}') || {}; } catch (e) { BEST = {}; }
-const TEST_UNLOCK_ALL = true;   // testing: every song open; set to false to restore the 2★ chain
-const unlocked = i => { if (TEST_UNLOCK_ALL) return true; const k = ORDER.indexOf(i); return k <= 0 || (BEST[ORDER[k - 1]] || 0) >= 2; };
+const TEST_UNLOCK_ALL = false;   // true = every song open (for testing)
+let TUT_DONE = false; try { TUT_DONE = localStorage.getItem('zvukach_tut') === '1'; } catch (e) {}
+function setTutDone() { if (TUT_DONE) return; TUT_DONE = true; try { localStorage.setItem('zvukach_tut', '1'); } catch (e) {} }
+// ask the browser to keep our saves (stars, band name, costumes) even when storage is tight
+try { if (navigator.storage && navigator.storage.persist) navigator.storage.persist().catch(() => {}); } catch (e) {}
+const unlocked = i => { if (TEST_UNLOCK_ALL) return true; const k = ORDER.indexOf(i); if (k <= 0) return TUT_DONE; return (BEST[ORDER[k - 1]] || 0) >= 2; };
 let menuMsg = null;
 let STOPS = [], SONG, SONG_I = 0, SECS, TOTAL, PROG, BRIDGE, VERSE, CHORUS, SOLO, BRIDGE_FROM, BRIDGE_LEN;
 function applySong(i) {
@@ -1423,7 +1427,7 @@ function tutEnter(step) {
   if (step === 3) { R.tBase = R.stats.zone; }
   if (step === 4) { R.charges = 99; }
   if (step === 5) { R.charges = 0; R.duel = { from: tutBar() + 2, len: 4, first: 1, hits: {} }; }
-  if (step === 6) { R.tEndAt = rt() + 2.8; cheer(1); spawnConfetti(50); }
+  if (step === 6) { setTutDone(); R.tEndAt = rt() + 2.8; cheer(1); spawnConfetti(50); }
 }
 function tutBeat(b) {
   const R = run, s = R.tstep, bar = Math.floor(b / 4);
@@ -1531,6 +1535,7 @@ function startCalib(flow) {
   ensureAudio(); state = 'calib';
   cal = { t0: Infinity, wait: true, taps: [], done: false, ok: false, flow: !!flow, msg: '', flash: -10 };
 }
+function titleGo() { if (TUT_DONE) { ensureAudio(); goFullscreen(); state = 'menu'; blip(700, 0.08); } else startCalib(true); }
 function calContinue() { if (cal.flow) startTutorial(); else state = 'menu'; }
 function calibBegin() { cal.wait = false; const t0 = now() + 0.9; PERSIST++; try { for (let i = 0; i < 12; i++) snare(t0 + i * BEAT, A.master, 0.9); } finally { PERSIST--; } cal.t0 = t0; cal.flash = rt(); }
 function calibTap() { if (!cal || cal.done) return; if (cal.wait) { calibBegin(); return; } cal.taps.push(now()); cal.flash = rt(); }
@@ -1600,7 +1605,7 @@ function musicianAt(p) {
 cv.addEventListener('pointerdown', e => {
   e.preventDefault(); ensureAudio();
   const p = toLocal(e);
-  if (state === 'title') { if (inBtn(BTN.go, p)) startCalib(true); return; }
+  if (state === 'title') { if (inBtn(BTN.go, p)) titleGo(); return; }
   if (state === 'vocal') {
     for (let i = 0; i < 2; i++) {
       const b = vocalCard(i); if (!inBtn(b, p)) continue;
@@ -1623,7 +1628,7 @@ cv.addEventListener('pointerdown', e => {
   if (state === 'menu') {
     if (inBtn(BTN.band, p)) { openBandDlg(); return; }
     const ck = ORDER.findIndex((_, k) => inBtn(songCard(k), p));
-    if (ck >= 0) { const si = ORDER[ck]; if (unlocked(si)) openVocal(si); else { menuMsg = { text: 'Сначала набери 2★ в «' + SONGS[ORDER[ck - 1]].title + '»', t0: rt() }; thudSnd(); } return; }
+    if (ck >= 0) { const si = ORDER[ck]; if (unlocked(si)) openVocal(si); else { menuMsg = { text: ck === 0 ? 'Сначала пройди обучение — кнопка внизу слева' : 'Сначала набери 2★ в «' + SONGS[ORDER[ck - 1]].title + '»', t0: rt() }; thudSnd(); } return; }
     else if (inBtn(BTN.calib, p)) startCalib(false); else if (inBtn(BTN.tut, p)) startTutorial();
     else if (inBtn(BTN.concert, p)) { if (concertOpen()) { SL = []; state = 'setlist'; blip(700, 0.08); } else { menuMsg = { text: 'Концерт откроется, когда 4 песни будут пройдены на 3★', t0: rt() }; thudSnd(); } }
     else if (inBtn(BTN.cost, p)) { if (costumesOpen()) { state = 'costume'; blip(700, 0.08); } else { menuMsg = { text: 'Костюмы откроются, когда все 6 песен будут пройдены', t0: rt() }; thudSnd(); } }
@@ -1638,10 +1643,10 @@ cv.addEventListener('pointerdown', e => {
     else calibTap();
     return;
   }
-  if (state === 'end') { if (inBtn(BTN.again, p)) startConcert(); else if (inBtn(BTN.menu, p)) quitToMenu(); return; }
+  if (state === 'end') { if (inBtn(BTN.again, p)) endNext(); else if (inBtn(BTN.menu, p)) quitToMenu(); return; }
   if (state === 'play' || state === 'count') {
     if (inBtn(BTN.quit, p)) { quitToMenu(); return; }
-    if (run.mode === 'tut' && inBtn(BTN.skip, p)) { startConcert(ORDER[0]); return; }
+    if (run.mode === 'tut' && inBtn(BTN.skip, p)) { setTutDone(); startConcert(ORDER[0]); return; }
     if (Math.hypot(p.x - PYRO.x, p.y - PYRO.y) < PYRO.r + 12) {
       firePyro();
       // fire lands on the chorus downbeat — the same moment as a guitar chord: the tap counts for that chord too, so the combo survives
@@ -1687,7 +1692,7 @@ window.addEventListener('keydown', e => {
   if (document.getElementById('bandDlg').classList.contains('on')) return;
   if (e.repeat) return;
   const k = e.key;
-  if (state === 'title' && (k === 'Enter' || k === ' ')) { e.preventDefault(); startCalib(true); return; }
+  if (state === 'title' && (k === 'Enter' || k === ' ')) { e.preventDefault(); titleGo(); return; }
   if (state === 'menu' && (k === 'Enter' || k === ' ')) { e.preventDefault(); startConcert(); return; }
   if (state === 'calib') { if (cal && cal.done) { if (k === 'Enter' && (cal.ok || calFails >= 2)) calContinue(); } else if (k === ' ') { e.preventDefault(); calibTap(); } return; }
   if (state === 'end' && k === 'Enter') { startConcert(); return; }
@@ -2268,7 +2273,7 @@ function drawMenu(tr) {
   if (menuMsg && rt() - menuMsg.t0 < 2.5) txt(menuMsg.text, W / 2, 314, FI(700, 12), C.warn, 'center', 'middle');
   else txt('Тап по карточке — выбрать вокалиста и начать', W / 2, 314, FI(400, 11), C.muted, 'center', 'middle');
 
-  drawBtn(BTN.tut);
+  drawBtn(TUT_DONE ? BTN.tut : Object.assign({}, BTN.tut, { primary: true }));
   drawBtn(BTN.calib, 'Калибровка · ' + Math.round(calOffset * 1000) + ' мс');
   lockedBtn(BTN.concert, concertOpen()); lockedBtn(BTN.cost, costumesOpen());
 }
@@ -2301,6 +2306,13 @@ function star(x, y, r, fill) {
   g.beginPath(); for (let i = 0; i < 10; i++) { const a = -Math.PI / 2 + i * Math.PI / 5, rr_ = i % 2 ? r * 0.45 : r; g.lineTo(x + Math.cos(a) * rr_, y + Math.sin(a) * rr_); }
   g.closePath(); g.fillStyle = fill ? C.yellow : 'rgba(244,241,250,.12)'; g.fill();
 }
+function nextAction() {
+  const k = ORDER.indexOf(SONG_I), nx = ORDER[k + 1];
+  if (nx != null && unlocked(nx)) return { label: 'ДАЛЕЕ ▸', go: () => startConcert(nx) };
+  if (nx == null && concertOpen()) return { label: 'КОНЦЕРТ ▸', go: () => { killRun(); run = null; SL = []; state = 'setlist'; } };
+  return { label: 'ЕЩЁ РАЗ', go: () => startConcert() };
+}
+function endNext() { nextAction().go(); }
 function drawEnd(tr) {
   dim(0.72); const r = result;
   txt('КОНЦЕРТ ОКОНЧЕН', W / 2, 58, '30px ' + FD, C.orange, 'center', 'middle');
@@ -2317,7 +2329,7 @@ function drawEnd(tr) {
   if (parts.length) { g.font = FI(600, 11); const all = parts.join(' · ');
     if (g.measureText(all).width < 780) txt(all, W / 2, 272, FI(600, 11), C.yellow, 'center', 'middle');
     else { const h = Math.ceil(parts.length / 2); txt(parts.slice(0, h).join(' · '), W / 2, 264, FI(600, 11), C.yellow, 'center', 'middle'); txt(parts.slice(h).join(' · '), W / 2, 281, FI(600, 11), C.yellow, 'center', 'middle'); } }
-  drawBtn(BTN.again); drawBtn(BTN.menu);
+  drawBtn(BTN.again, nextAction().label); drawBtn(BTN.menu);
 }
 
 // ---------- concert mode ----------
