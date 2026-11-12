@@ -41,6 +41,8 @@
 'use strict';
 // ---------- constants ----------
 const W = 844, H = 390;
+// game version, shown small in the corner of the title screen and the menu. Bump it together with VERSION in sw.js
+const APP_VERSION = 'v8';
 let BPM = 120, BEAT = 60 / BPM, STEP = BEAT / 4, BAR = BEAT * 4;
 const C = { bg:'#0E0B14', wall:'#15111D', text:'#F4F1FA', muted:'#A69FB8', blue:'#6CC2FF', orange:'#FF8A1F',
   warn:'#FFA94D', bad:'#FF6B5E', yellow:'#FFD34D', tomato:'#E5372B', splat:'#D8301F' };
@@ -2403,7 +2405,9 @@ function drawTitle(tr) {
   txt('Выключи беззвучный режим и сделай погромче', W / 2, 208, FI(400, 12), C.muted, 'center', 'middle');
   drawBtn(BTN.go);
   if (installEvt) drawBtn(BTN.install);
+  drawVersion();
 }
+function drawVersion() { txt(APP_VERSION, W - 8, H - 7, FI(400, 10), 'rgba(166,159,184,.55)', 'right', 'alphabetic'); }
 // Chrome on Android shows its own "Install app" bar after a minute of play — it popped up in the middle of a song.
 // Keep it hidden and offer the install from a button on the title screen (only when the browser says it is possible).
 let installEvt = null;
@@ -2435,6 +2439,7 @@ function drawMenu(tr) {
 
   drawBtn(TUT_DONE ? BTN.tut : Object.assign({}, BTN.tut, { primary: true }));
   drawBtn(BTN.calib, 'Калибровка · ' + Math.round(calOffset * 1000) + ' мс');
+  drawVersion();
   lockedBtn(BTN.concert, concertOpen()); lockedBtn(BTN.cost, costumesOpen());
 }
 function lockedBtn(b, open) {
