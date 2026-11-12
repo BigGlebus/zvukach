@@ -263,12 +263,35 @@ function ensureAudio() {
   amb.connect(bp); bp.connect(crowdBus); amb.start();
   ['createGain', 'createBiquadFilter', 'createStereoPanner', 'createWaveShaper', 'createOscillator', 'createBufferSource', 'createDelay'].forEach(fnName => {
     const orig = ctx[fnName]; if (!orig) return;
-    ctx[fnName] = function () { const n = orig.apply(ctx, arguments); if (!PERSIST) EPH.push([n, ctx.currentTime + 9]); return n; };
+    ctx[fnName] = function () { const n = orig.apply(ctx, arguments); if (!PERSIST) { const e = [n, ctx.currentTime + 9]; EPH.push(e); GRP.nodes.push(e); if (n.start) watchEnd(n); } return n; };
   });
 }
 // nodes made outside a note (mixer, per-run buses) are PERSIST; everything else is swept once its note is long over
 let PERSIST = 0; const EPH = [];
-function sweepNodes() { if (!A) return; const t = A.ctx.currentTime; let k = 0; while (k < EPH.length && EPH[k][1] < t) { try { EPH[k][0].disconnect(); } catch (e) {} k++; } if (k) EPH.splice(0, k); }
+// Finished notes must leave the graph soon: every node still connected is walked by the audio thread on every
+// block, and keeping each note ~9 s made a chorus ~1.6x heavier (≈2200 live nodes instead of ≈800).
+// Nodes created together (one step of the song, or one sound effect) form a group; when every source in the group
+// has a known end (stop() time or start() duration), the whole group is released 0.5 s after the last source ends
+// (sooner or later than 9 s). If any end is unknown, the group keeps the old 9 s.
+const newGroup = () => ({ nodes: [], end: -Infinity, unknown: 0 });
+let GRP = newGroup();
+function watchEnd(n) {
+  const G = GRP, st = n.start, sp = n.stop; let open = true; G.unknown++;
+  const mark = when => { if (open) { open = false; G.unknown--; } if (when > G.end) G.end = when; };
+  n.start = function (when, off, dur) { if (dur != null && !this.loop) mark((when || 0) + dur); return st.apply(this, arguments); };
+  n.stop = function (when) { mark(when || (A ? A.ctx.currentTime : 0)); return sp.apply(this, arguments); };
+}
+function closeGroup() {
+  const G = GRP; if (!G.nodes.length) return; GRP = newGroup();
+  if (G.unknown > 0 || !isFinite(G.end)) return;
+  const exp = G.end + 0.5; G.nodes.forEach(e => { e[1] = exp; });   // also longer than 9 s when the notes really last longer (4-bar ballad preview)
+}
+function sweepNodes() {
+  if (!A) return; closeGroup();
+  const t = A.ctx.currentTime; let w = 0;
+  for (let k = 0; k < EPH.length; k++) { const e = EPH[k]; if (e[1] < t) { try { e[0].disconnect(); } catch (x) {} } else EPH[w++] = e; }
+  EPH.length = w;
+}
 const now = () => A.ctx.currentTime;
 const LIVE = new Set();
 function track(src) { LIVE.add(src); src.onended = () => LIVE.delete(src); return src; }
@@ -420,6 +443,7 @@ function scheduler() {
   while (run.nextTime < A.ctx.currentTime + 0.3) {
     if (run.mode === 'tut') { if (run.nextStep < 300 * 16) tutStep(run.nextStep, run.nextTime); }
     else if (run.nextStep < TOTAL * 16) scheduleStep(run.nextStep, run.nextTime);
+    closeGroup();
     run.nextStep++; run.nextTime = run.songStart + run.nextStep * STEP;
   }
 }
@@ -849,6 +873,9 @@ function rBass(t, d, m, dur, v) {
 function rChord(t, d, m, dur, v, mute, det) {
   const n = env(t, 0.003, v * 0.22, dur, mute ? dur * 0.7 : 0.1), lp = filt('lowpass', mute ? 1300 : 9000);
   lp.connect(n); n.connect(d);
+  // Android: one detuned saw per chord tone instead of two (alternating sides keeps some width), a bit louder to match
+  if (AUDIO_LITE) { const g2 = A.ctx.createGain(); g2.gain.value = 1.4; g2.connect(lp);   // 3 saws instead of 6: ×√2 keeps the level
+    [0, 7, 12].forEach((iv, k) => { const o = osc('sawtooth', mtof(m + iv), t); o.detune.value = (k % 2 ? 1 : -1) * (6 + det) + (Math.random() - 0.5) * 4; o.connect(g2); o.start(t); o.stop(t + dur + 0.05); }); return; }
   [0, 7, 12].forEach(iv => [-1, 1].forEach(sg => { const o = osc('sawtooth', mtof(m + iv), t); o.detune.value = sg * (6 + det) + (Math.random() - 0.5) * 4; o.connect(lp); o.start(t); o.stop(t + dur + 0.05); }));
 }
 function rPad(t, d, notes, dur, v) {
@@ -886,20 +913,24 @@ function voiceNote(t, d, m, dur, v, vowel, o) {
   const vib = osc('sine', V.vibRate, t), vg = ctx.createGain(); vg.gain.setValueAtTime(0, t);
   if (dur > vd + 0.1) { vg.gain.setValueAtTime(0, t + vd); vg.gain.linearRampToValueAtTime(f * depth, t + vd + 0.25); }
   vib.connect(vg); vg.connect(src.frequency);
-  const j1 = osc('sine', 0.3 + Math.random() * 0.5, t), j2 = osc('sine', 1.6 + Math.random() * 1.8, t), jg = ctx.createGain();
-  jg.gain.value = f * V.jitter; j1.connect(jg); j2.connect(jg); jg.connect(src.frequency); extra.push(j1, j2);
+  // Android (AUDIO_LITE): the voice is the heaviest part of a chorus, so the subtle layers — pitch jitter, amplitude
+  // shimmer, rasp, airy/grit noise — are skipped there; source, vibrato, the three formants and the breath stay
+  if (!AUDIO_LITE) {
+    const j1 = osc('sine', 0.3 + Math.random() * 0.5, t), j2 = osc('sine', 1.6 + Math.random() * 1.8, t), jg = ctx.createGain();
+    jg.gain.value = f * V.jitter; j1.connect(jg); j2.connect(jg); jg.connect(src.frequency); extra.push(j1, j2);
+  }
   // source = glottal buzz (tilted) + breath noise, both through the vocal tract
   const tilt = filt('lowpass', V.tilt, 0.5); src.connect(tilt);
   const fin = ctx.createGain(); tilt.connect(fin);
   const asp = noise(t, dur + 0.1), ag = ctx.createGain(); ag.gain.value = V.asp; asp.connect(ag); ag.connect(fin);
-  if (V.rasp) {
+  if (V.rasp && !AUDIO_LITE) {
     const sub = osc('square', f0 / 2, t); sub.frequency.exponentialRampToValueAtTime(f / 2, t + 0.07);
     const sg = ctx.createGain(); sg.gain.value = 0.05; const am = osc('sine', 9 + Math.random() * 8, t), amg = ctx.createGain(); amg.gain.value = 0.05;
     am.connect(amg); amg.connect(sg.gain); sub.connect(sg); sg.connect(fin); extra.push(sub, am);
   }
   // amplitude shimmer
-  const amp = ctx.createGain(); amp.gain.value = 1; const shm = osc('sine', 4 + Math.random() * 2.5, t), shg = ctx.createGain(); shg.gain.value = V.shimmer;
-  shm.connect(shg); shg.connect(amp.gain); fin.connect(amp); extra.push(shm);
+  const amp = ctx.createGain(); amp.gain.value = 1; fin.connect(amp);
+  if (!AUDIO_LITE) { const shm = osc('sine', 4 + Math.random() * 2.5, t), shg = ctx.createGain(); shg.gain.value = V.shimmer; shm.connect(shg); shg.connect(amp.gain); extra.push(shm); }
   // formants, gliding from the previous vowel (or a consonant-like onset)
   const F = V.form[vowel] || V.form.a, PF = o.fromVowel && V.form[o.fromVowel] ? V.form[o.fromVowel] : [F[0] * 0.75, F[1] * 0.8, F[2]];
   const sum = ctx.createGain();
@@ -914,8 +945,8 @@ function voiceNote(t, d, m, dur, v, vowel, o) {
   const out = env(t, o.att || 0.045, v * 3.2 * V.gain * (VOWEL_GAIN[vowel] || 1), dur, Math.min(0.13, dur * 0.4));
   endN.connect(out); out.connect(d);
   if (!o.noBreath) { const s_ = noise(t, 0.09), hp = filt('highpass', V.airy ? 1600 : 2200), bn = env(t, 0.01, v * V.breath, 0.09, 0.07); s_.connect(hp); hp.connect(bn); bn.connect(d); }
-  if (V.airy && !o.noBreath) { const s_ = noise(t, dur), hp = filt('bandpass', 2400, 0.5), bn = env(t, 0.06, v * V.breath * (V.airyK || 0.6), dur, Math.min(0.12, dur * 0.4)); s_.connect(hp); hp.connect(bn); bn.connect(d); }
-  if (V.grit && !o.noBreath) { const s_ = noise(t, dur), bp = filt('bandpass', 1300, 0.7), bn = env(t, 0.03, v * 0.08 * V.grit, dur, Math.min(0.1, dur * 0.4)); s_.connect(bp); bp.connect(bn); bn.connect(d); }
+  if (V.airy && !o.noBreath && !AUDIO_LITE) { const s_ = noise(t, dur), hp = filt('bandpass', 2400, 0.5), bn = env(t, 0.06, v * V.breath * (V.airyK || 0.6), dur, Math.min(0.12, dur * 0.4)); s_.connect(hp); hp.connect(bn); bn.connect(d); }
+  if (V.grit && !o.noBreath && !AUDIO_LITE) { const s_ = noise(t, dur), bp = filt('bandpass', 1300, 0.7), bn = env(t, 0.03, v * 0.08 * V.grit, dur, Math.min(0.1, dur * 0.4)); s_.connect(bp); bp.connect(bn); bn.connect(d); }
   [src, vib].concat(extra).forEach(x => { x.start(t); x.stop(t + dur + 0.2); });
 }
 const VOWELS = ['a', 'o', 'a', 'e', 'a', 'u', 'o', 'a'];
@@ -1641,6 +1672,7 @@ const BTN = {
   band: { x: 664, y: 14, w: 166, h: 34, label: '✎ Название группы' },
   vBack: { x: 222, y: 292, w: 160, h: 48, label: '← Назад' }, vGo: { x: 402, y: 292, w: 220, h: 48, label: 'НАЧАТЬ КОНЦЕРТ', primary: true },
   go: { x: 282, y: 262, w: 280, h: 56, label: 'НАЧАТЬ', primary: true },
+  install: { x: 302, y: 330, w: 240, h: 38, label: '⬇ Установить на экран' },
   skip: { x: 690, y: 7, w: 146, h: 31, label: 'Пропустить →' },
   again: { x: 232, y: 300, w: 180, h: 50, label: 'ЕЩЁ РАЗ', primary: true },
   menu:  { x: 432, y: 300, w: 180, h: 50, label: 'В меню' },
@@ -1691,7 +1723,7 @@ function musicianAt(p) {
 cv.addEventListener('pointerdown', e => {
   e.preventDefault(); ensureAudio();
   const p = toLocal(e);
-  if (state === 'title') { if (inBtn(BTN.go, p)) titleGo(); return; }
+  if (state === 'title') { if (installEvt && inBtn(BTN.install, p)) { promptInstall(); return; } if (inBtn(BTN.go, p)) titleGo(); return; }
   if (state === 'vocal') {
     for (let i = 0; i < 2; i++) {
       const b = vocalCard(i); if (!inBtn(b, p)) continue;
@@ -2370,7 +2402,14 @@ function drawTitle(tr) {
   if (!TUT_DONE) txt('Сначала настроим звук и пройдём короткое обучение — около минуты', W / 2, 186, FI(400, 13), C.muted, 'center', 'middle');
   txt('Выключи беззвучный режим и сделай погромче', W / 2, 208, FI(400, 12), C.muted, 'center', 'middle');
   drawBtn(BTN.go);
+  if (installEvt) drawBtn(BTN.install);
 }
+// Chrome on Android shows its own "Install app" bar after a minute of play — it popped up in the middle of a song.
+// Keep it hidden and offer the install from a button on the title screen (only when the browser says it is possible).
+let installEvt = null;
+window.addEventListener('beforeinstallprompt', e => { e.preventDefault(); installEvt = e; });
+window.addEventListener('appinstalled', () => { installEvt = null; });
+function promptInstall() { const e = installEvt; installEvt = null; try { e.prompt(); } catch (err) {} }
 function drawMenu(tr) {
   dim(0.88);
   txt('ЗВУКАЧ', W / 2, 46, '36px ' + FD, C.orange, 'center', 'middle');
