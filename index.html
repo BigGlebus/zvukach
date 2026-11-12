@@ -42,7 +42,7 @@
 // ---------- constants ----------
 const W = 844, H = 390;
 // game version, shown small in the corner of the title screen and the menu. Bump it together with VERSION in sw.js
-const APP_VERSION = 'v8';
+const APP_VERSION = 'v9';
 let BPM = 120, BEAT = 60 / BPM, STEP = BEAT / 4, BAR = BEAT * 4;
 const C = { bg:'#0E0B14', wall:'#15111D', text:'#F4F1FA', muted:'#A69FB8', blue:'#6CC2FF', orange:'#FF8A1F',
   warn:'#FFA94D', bad:'#FF6B5E', yellow:'#FFD34D', tomato:'#E5372B', splat:'#D8301F' };
@@ -210,6 +210,12 @@ function fitFont(text, max, min, maxW) {
 }
 function txt(s, x, y, font, col, align, base) {
   g.font = font; g.fillStyle = col; g.textAlign = align || 'left'; g.textBaseline = base || 'alphabetic'; g.fillText(s, x, y);
+}
+// cut a line with «…» so it fits maxW at the given font
+function clipText(s, font, maxW) {
+  g.font = font; if (g.measureText(s).width <= maxW) return s;
+  while (s.length > 1 && g.measureText(s + '…').width > maxW) s = s.slice(0, -1);
+  return s + '…';
 }
 function circle(x, y, r, col) { g.fillStyle = col; g.beginPath(); g.arc(x, y, r, 0, Math.PI * 2); g.fill(); }
 const clamp = (v, a, b) => Math.max(a, Math.min(b, v));
@@ -1183,7 +1189,9 @@ function planEvents() {
 }
 let SEEN = {}; try { SEEN = JSON.parse(localStorage.getItem('zvukach_seen') || '{}') || {}; } catch (e) { SEEN = {}; }
 function markSeen(k) { const R = run; if (!R || R.mode === 'tut') return; if (!R.fh) R.fh = {}; if (!SEEN[k]) { SEEN[k] = 1; R.fh[k] = true; try { localStorage.setItem('zvukach_seen', JSON.stringify(SEEN)); } catch (e) {} } }
-const fh = k => run && (run.mode === 'tut' || (run.fh && run.fh[k]));     // show the "tap me" bubble: tutorial always, songs only the first time ever
+// show the "tap me" bubble over whoever needs a tap. It used to appear in songs only the very first time an event was
+// ever seen — players who missed that moment were left guessing later. Every call site checks that the event is active.
+const fh = k => !!run;
 function bubble(x, y, text, col) {
   g.font = FI(800, 10); const w = g.measureText(text).width + 14;
   rr(x - w / 2, y - 9, w, 18, 9); g.fillStyle = col; g.fill();
@@ -2269,12 +2277,12 @@ function drawHUD(t, tr) {
   // quit
   rr(BTN.quit.x + 4, BTN.quit.y + 4, 32, 32, 16); g.fillStyle = 'rgba(244,241,250,.08)'; g.fill();
   g.strokeStyle = C.muted; g.lineWidth = 2; g.lineCap = 'round'; g.beginPath(); g.moveTo(20, 20); g.lineTo(32, 32); g.moveTo(32, 20); g.lineTo(20, 32); g.stroke();
-  // song
-  const ttl = '«' + SONG.title + '»';
-  txt(ttl, 56, 20, FI(800, 13), C.text);
-  txt((CONCERT ? (CONCERT.phase === 'encore' ? 'Бис · ' : 'Концерт ' + (CONCERT.idx + 1) + '/3 · ') : '') + (songT < 0 ? 'Отсчёт' : sec.name), 56 + g.measureText(ttl).width + 8, 20, FI(400, 12), C.muted);
-  rr(56, 28, 140, 4, 2); g.fillStyle = 'rgba(244,241,250,.14)'; g.fill();
-  rr(56, 28, 140 * clamp(songT / (TOTAL * BAR), 0, 1), 4, 2); g.fillStyle = C.orange; g.fill();
+  // song: title, then the part of the song on its own line — on one line long names ran into the score
+  const LW = 300;   // the left block ends at x≈356; the score starts at ≈370 even with 7 digits
+  txt(clipText('«' + SONG.title + '»', FI(800, 13), LW), 56, 16, FI(800, 13), C.text);
+  txt(clipText((CONCERT ? (CONCERT.phase === 'encore' ? 'Бис · ' : 'Концерт ' + (CONCERT.idx + 1) + '/3 · ') : '') + (songT < 0 ? 'Отсчёт' : sec.name), FI(400, 11), LW), 56, 30, FI(400, 11), C.muted);
+  rr(56, 35, 140, 3, 1.5); g.fillStyle = 'rgba(244,241,250,.14)'; g.fill();
+  rr(56, 35, 140 * clamp(songT / (TOTAL * BAR), 0, 1), 3, 1.5); g.fillStyle = C.orange; g.fill();
   // score
   txt(R.score.toLocaleString('ru-RU'), W / 2, 25, '22px ' + FD, C.text, 'center');
   txt(R.combo > 1 ? '×' + R.combo + ' КОМБО' : ' ', W / 2, 38, FI(800, 9), C.blue, 'center');
