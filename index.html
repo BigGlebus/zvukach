@@ -35,7 +35,7 @@
 </head>
 <body>
 <canvas id="c" aria-label="Игра Звукач"></canvas>
-<div id="bandDlg"><div class="box"><b>Название группы</b><input id="bandIn" maxlength="20" autocomplete="off" autocapitalize="words" spellcheck="false"><small>Русские или английские буквы, цифры, до 20 знаков</small><div class="row"><button id="bandNo">Отмена</button><button id="bandOk">Готово</button></div></div></div>
+<div id="bandDlg"><div class="box"><b id="bandTtl">Название группы</b><span id="bandSub" style="display:none;color:#F4F1FA;font-weight:400;font-size:13px">Обучение пройдено! Как назовётся твоя группа?</span><input id="bandIn" maxlength="20" autocomplete="off" autocapitalize="words" spellcheck="false"><small>Русские или английские буквы, цифры, до 20 знаков</small><div class="row"><button id="bandNo">Отмена</button><button id="bandOk">Готово</button></div></div></div>
 <div id="rotate"><b>ЗВУКАЧ</b><span>Поверни телефон горизонтально</span></div>
 <script>
 'use strict';
@@ -1579,20 +1579,29 @@ function drawBtn(b, label) {
 }
 
 // ---------- band name ----------
-let BAND = 'Громовые Лисы';
-try { const b = localStorage.getItem('zvukach_band'); if (b) BAND = b; } catch (e) {}
+const BAND_DEF = 'Громовые Лисы'; let BAND = BAND_DEF, BAND_SET = false;
+try { const b = localStorage.getItem('zvukach_band'); if (b) { BAND = b; BAND_SET = true; } } catch (e) {}
+let bandAfter = null;   // first naming right after the tutorial: then the first song starts
 const BAND_RE = /^[A-Za-zА-Яа-яЁё0-9 .,!?&'\-]{1,20}$/;
 const bandDlg = document.getElementById('bandDlg'), bandIn = document.getElementById('bandIn');
-function openBandDlg() { bandIn.value = BAND; bandDlg.classList.add('on'); setTimeout(() => { try { bandIn.focus(); bandIn.select(); } catch (e) {} }, 30); }
+function openBandDlg(first) {
+  bandAfter = first || null;
+  document.getElementById('bandTtl').textContent = first ? 'Твоя группа' : 'Название группы';
+  document.getElementById('bandSub').style.display = first ? '' : 'none';
+  document.getElementById('bandNo').style.display = first ? 'none' : '';
+  bandIn.value = first ? '' : BAND; bandIn.placeholder = BAND_DEF; bandDlg.classList.add('on'); setTimeout(() => { try { bandIn.focus(); bandIn.select(); } catch (e) {} }, 30); }
 function closeBandDlg(save) {
-  if (save) { const v = bandIn.value.replace(/\s+/g, ' ').trim();
+  if (save) { const v = bandIn.value.replace(/\s+/g, ' ').trim() || (bandAfter ? BAND_DEF : '');
     if (!BAND_RE.test(v)) { bandIn.style.borderColor = '#FF6B5E'; return; }
-    BAND = v; try { localStorage.setItem('zvukach_band', v); } catch (e) {} }
+    BAND = v; BAND_SET = true; try { localStorage.setItem('zvukach_band', v); } catch (e) {} }
   bandIn.style.borderColor = ''; bandDlg.classList.remove('on'); bandIn.blur();
+  if (bandAfter) { const f = bandAfter; bandAfter = null; f(); }
 }
 document.getElementById('bandOk').addEventListener('click', () => closeBandDlg(true));
 document.getElementById('bandNo').addEventListener('click', () => closeBandDlg(false));
-bandIn.addEventListener('keydown', e => { if (e.key === 'Enter') { e.preventDefault(); closeBandDlg(true); } else if (e.key === 'Escape') closeBandDlg(false); });
+bandIn.addEventListener('keydown', e => { if (e.key === 'Enter') { e.preventDefault(); closeBandDlg(true); } else if (e.key === 'Escape' && !bandAfter) closeBandDlg(false); });
+// after the tutorial (finished or skipped): name the band once, then the first song
+function afterTutorial() { setTutDone(); if (BAND_SET) { startConcert(ORDER[0]); return; } killRun(); run = null; state = 'menu'; openBandDlg(() => startConcert(ORDER[0])); }
 
 // ---------- input ----------
 const swipes = new Map(), pendingOff = new Map();
@@ -1646,7 +1655,7 @@ cv.addEventListener('pointerdown', e => {
   if (state === 'end') { if (inBtn(BTN.again, p)) endNext(); else if (inBtn(BTN.menu, p)) quitToMenu(); return; }
   if (state === 'play' || state === 'count') {
     if (inBtn(BTN.quit, p)) { quitToMenu(); return; }
-    if (run.mode === 'tut' && inBtn(BTN.skip, p)) { setTutDone(); startConcert(ORDER[0]); return; }
+    if (run.mode === 'tut' && inBtn(BTN.skip, p)) { afterTutorial(); return; }
     if (Math.hypot(p.x - PYRO.x, p.y - PYRO.y) < PYRO.r + 12) {
       firePyro();
       // fire lands on the chorus downbeat — the same moment as a guitar chord: the tap counts for that chord too, so the combo survives
@@ -1927,12 +1936,12 @@ function drawScene(songT, hype, live, tr) {
   // banner
   if (live) {             // in play the LED banner is the tap lane; the band name runs small on top
     rr(212, 50, 420, 50, 6); g.fillStyle = '#120E1A'; g.fill(); g.strokeStyle = hype > 35 ? 'rgba(255,211,77,' + (0.25 + 0.35 * pulse * hk).toFixed(3) + ')' : '#2B2338'; g.lineWidth = 2; g.stroke();
-    const bn = BAND.toUpperCase(); let fs = 11; g.font = fs + 'px ' + FD; while (fs > 8 && g.measureText(bn).width > 380) { fs--; g.font = fs + 'px ' + FD; }
+    const bn = (BAND_SET ? BAND : 'ЗВУКАЧ').toUpperCase(); let fs = 11; g.font = fs + 'px ' + FD; while (fs > 8 && g.measureText(bn).width > 380) { fs--; g.font = fs + 'px ' + FD; }
     txt(bn, W / 2, 60, fs + 'px ' + FD, hype > 35 ? 'rgba(255,211,77,.55)' : '#5C5468', 'center', 'middle');
   } else {
     rr(282, 54, 280, 42, 5); g.fillStyle = '#120E1A'; g.fill(); g.strokeStyle = '#2B2338'; g.lineWidth = 2; g.stroke();
     if (hype > 35) { g.shadowColor = 'rgba(255,211,77,.8)'; g.shadowBlur = 8 + 10 * pulse * hk; }
-    { const bn = BAND.toUpperCase(); let fs = 21; g.font = fs + 'px ' + FD; while (fs > 11 && g.measureText(bn).width > 262) { fs--; g.font = fs + 'px ' + FD; } txt(bn, W / 2, 76, fs + 'px ' + FD, hype > 35 ? C.yellow : '#5C5468', 'center', 'middle'); }
+    { const bn = (BAND_SET ? BAND : 'ЗВУКАЧ').toUpperCase(); let fs = 21; g.font = fs + 'px ' + FD; while (fs > 11 && g.measureText(bn).width > 262) { fs--; g.font = fs + 'px ' + FD; } txt(bn, W / 2, 76, fs + 'px ' + FD, hype > 35 ? C.yellow : '#5C5468', 'center', 'middle'); }
     g.shadowBlur = 0;
   }
   // stage floor
@@ -2245,15 +2254,15 @@ function songCard(k) { return { x: 52 + (k % 3) * 252, y: 100 + Math.floor(k / 3
 function drawTitle(tr) {
   dim(0.86);
   txt('ЗВУКАЧ', W / 2, 92, '52px ' + FD, C.orange, 'center', 'middle');
-  txt('Музыкальная игра · группа «' + BAND + '»', W / 2, 134, FI(600, 14), C.text, 'center', 'middle');
-  txt('Сначала настроим звук и пройдём короткое обучение — около минуты', W / 2, 186, FI(400, 13), C.muted, 'center', 'middle');
+  txt(BAND_SET ? 'Музыкальная игра · группа «' + BAND + '»' : 'Музыкальная игра', W / 2, 134, FI(600, 14), C.text, 'center', 'middle');
+  if (!TUT_DONE) txt('Сначала настроим звук и пройдём короткое обучение — около минуты', W / 2, 186, FI(400, 13), C.muted, 'center', 'middle');
   txt('Выключи беззвучный режим и сделай погромче', W / 2, 208, FI(400, 12), C.muted, 'center', 'middle');
   drawBtn(BTN.go);
 }
 function drawMenu(tr) {
   dim(0.88);
   txt('ЗВУКАЧ', W / 2, 46, '36px ' + FD, C.orange, 'center', 'middle');
-  txt('«' + BAND + '» · выбери песню', W / 2, 80, FI(600, 13), C.text, 'center', 'middle');
+  txt(BAND_SET ? '«' + BAND + '» · выбери песню' : 'Выбери песню', W / 2, 80, FI(600, 13), C.text, 'center', 'middle');
   drawBtn(BTN.band, '✎ Название группы');
   ORDER.forEach((i, k) => {
     const sg = SONGS[i], b = songCard(k), sel = i === SONG_I, open = unlocked(i), best = BEST[i] || 0;
@@ -2508,7 +2517,7 @@ function frame() {
       if (!tg.j) { if (tg.need) { tg.j = 'm'; R.miss++; addHype(-1); breakCombo(); } else tg.j = 'skip'; }
       R.ti++;
     }
-    if (R.mode === 'tut' && R.tEndAt && tr > R.tEndAt) { startConcert(ORDER[0]); return; }
+    if (R.mode === 'tut' && R.tEndAt && tr > R.tEndAt) { R.tEndAt = 0; afterTutorial(); return; }
     updateFans(tr); updateEvents(tr);
     if (state === 'play' && R.mode !== 'tut' && R.hype < 30 && tr > R.nextTomato) { spawnTomato(); R.nextTomato = tr + 0.7 + Math.random() * (0.6 + R.hype / 30 * 1.4); }
     if (R.mode !== 'tut' && t > R.songStart + TOTAL * BAR + 1.0 && !R.ended) finish();
