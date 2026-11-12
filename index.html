@@ -217,12 +217,35 @@ let A = null;
 let calOffset = 0.05;
 let savedCal = false;
 try { const v = parseFloat(localStorage.getItem('dirizher_cal')); if (!isNaN(v)) { calOffset = v; savedCal = true; } } catch (e) {}
+// Android: Chrome there runs Web Audio with a very small buffer by default. On weaker phones the synth then can't keep
+// up — the sound starts lagging and finally cuts out (worse with fast taps). So on Android: a ~50 ms buffer and a
+// lighter mix (shorter reverb, noise hi-hats, no 2x oversampling). iPhone keeps the full mix.
+const IS_ANDROID = /Android/i.test(navigator.userAgent);
+let AUDIO_LITE = IS_ANDROID;
+const ANDROID_LATENCY = 0.05;
+
+function newAudioContext(AC) {
+  if (!IS_ANDROID) return new AC();
+  try { return new AC({ latencyHint: ANDROID_LATENCY }); } catch (e) {}
+  try { return new AC({ latencyHint: 'playback' }); } catch (e) {}
+  return new AC();
+}
+// a calibration saved before the bigger Android buffer was measured with the small one: shift it once by the difference
+function adaptSavedCal(ctx, AC) {
+  let mode = null; try { mode = localStorage.getItem('zvukach_cal_mode'); } catch (e) {}
+  if (!IS_ANDROID || !savedCal || mode === 'android50') return;
+  let d = 0;
+  try { const probe = new AC(); d = (ctx.baseLatency || 0) - (probe.baseLatency || 0); if (probe.close) probe.close().catch(() => {}); } catch (e) {}
+  if (d > 0 && d < 0.2) calOffset = clamp(calOffset + d, 0, 0.35);
+  try { localStorage.setItem('dirizher_cal', String(calOffset)); localStorage.setItem('zvukach_cal_mode', 'android50'); } catch (e) {}
+}
 
 function ensureAudio() {
   if (A) { if (A.ctx.state !== 'running') A.ctx.resume(); return; }
   try { if (navigator.audioSession) navigator.audioSession.type = 'playback'; } catch (e) {}
   const AC = window.AudioContext || window.webkitAudioContext;
-  const ctx = new AC();
+  const ctx = newAudioContext(AC);
+  adaptSavedCal(ctx, AC);
   const comp = ctx.createDynamicsCompressor(); comp.threshold.value = -14; comp.ratio.value = 4; comp.connect(ctx.destination);
   const master = ctx.createGain(); master.gain.value = 0.9; master.connect(comp);
   const crowdBus = ctx.createGain(); crowdBus.gain.value = 0; crowdBus.connect(master);
@@ -585,7 +608,11 @@ function onBeat(b) {
 // --- feedback helpers ---
 const hapEl = (() => { try { const l = document.createElement('label'), i = document.createElement('input'); i.type = 'checkbox'; i.setAttribute('switch', '');
   l.appendChild(i); l.style.cssText = 'position:fixed;left:-200px;top:0;opacity:0;pointer-events:none'; document.body.appendChild(l); return l; } catch (e) { return null; } })();
-function haptic(ms) { try { if (navigator.vibrate && navigator.vibrate(Array.isArray(ms) ? ms : Math.max(ms, 18))) return; } catch (e) {} try { if (hapEl) hapEl.click(); } catch (e) {} }
+let lastHaptic = -10;
+function haptic(ms) {
+  // Android: a vibration on every fast tap adds load right when the sound is busiest — at most one short buzz per 150 ms
+  if (IS_ANDROID && !Array.isArray(ms) && ms <= 20) { const t = rt(); if (t - lastHaptic < 0.15) return; lastHaptic = t; }
+  try { if (navigator.vibrate && navigator.vibrate(Array.isArray(ms) ? ms : Math.max(ms, 18))) return; } catch (e) {} try { if (hapEl) hapEl.click(); } catch (e) {} }
 function clapSnd(perfect) { const t = now(); const s = noise(t, 0.08), bp = filt('bandpass', perfect ? 2300 : 1600, 1.2), n = env(t, 0.001, perfect ? 0.34 : 0.22, 0.08, 0.07); s.connect(bp); bp.connect(n); n.connect(A.master); }
 function thudSnd() { const t = now(); const o = osc('triangle', 110, t); o.frequency.exponentialRampToValueAtTime(50, t + 0.15); const n = env(t, 0.002, 0.4, 0.16, 0.15); o.connect(n); n.connect(A.master); o.start(t); o.stop(t + 0.18); }
 function burst(x, y, col, bad) { fx.bursts.push({ x, y, col, bad, t0: rt() }); if (fx.bursts.length > 12) fx.bursts.shift(); }
@@ -741,7 +768,8 @@ function buildMixer(ctx, bandBus) {
   const mk = ctx.createGain(); mk.gain.value = 1.3;
   bandBus.connect(glue); glue.connect(lowS); lowS.connect(highS); highS.connect(lim); lim.connect(mk); mk.connect(A.master);
   // reverb + delay
-  const rev = ctx.createConvolver(); rev.buffer = makeIR(ctx, 1.9, 3.2); const revRet = ctx.createGain(); revRet.gain.value = 0.55;
+  // the reverb tail is the heaviest always-on part of the mix — shorter on Android
+  const rev = ctx.createConvolver(); rev.buffer = makeIR(ctx, AUDIO_LITE ? 0.9 : 1.9, 3.2); const revRet = ctx.createGain(); revRet.gain.value = 0.55;
   const revHP = ctx.createBiquadFilter(); revHP.type = 'highpass'; revHP.frequency.value = 250; rev.connect(revHP); revHP.connect(revRet); revRet.connect(bandBus);
   const dly = ctx.createDelay(1.5); dly.delayTime.value = STEP * 3; const fb = ctx.createGain(); fb.gain.value = 0.3;
   const dlp = ctx.createBiquadFilter(); dlp.type = 'lowpass'; dlp.frequency.value = 3000; const dRet = ctx.createGain(); dRet.gain.value = 0.35;
@@ -757,7 +785,7 @@ function buildMixer(ctx, bandBus) {
     return inp;
   };
   const bq = (type, f, q, gn) => { const b = ctx.createBiquadFilter(); b.type = type; b.frequency.value = f; if (q) b.Q.value = q; if (gn != null) b.gain.value = gn; return b; };
-  const gtrChain = () => { const drive = ctx.createGain(); drive.gain.value = 2.2; const sh = ctx.createWaveShaper(); sh.curve = A.curve; sh.oversample = '2x';
+  const gtrChain = () => { const drive = ctx.createGain(); drive.gain.value = 2.2; const sh = ctx.createWaveShaper(); sh.curve = A.curve; sh.oversample = AUDIO_LITE ? 'none' : '2x';
     return [bq('highpass', 110, 0.7), drive, sh, bq('peaking', 400, 1, -4), bq('peaking', 2500, 1, 3), bq('lowpass', 5200, 0.7)]; };
   return {
     _dly: dly,
@@ -789,12 +817,23 @@ function rSnare(t, d, v) {
   const s = noise(t, 0.25), bp = filt('bandpass', 3200, 0.7), n = env(t, 0.001, v * 0.9, 0.22, 0.2); s.connect(bp); bp.connect(n); n.connect(d);
   [190, 330].forEach((f, i) => { const o = osc('triangle', f, t); o.frequency.exponentialRampToValueAtTime(f * 0.75, t + 0.06); const e = env(t, 0.001, v * (i ? 0.25 : 0.45), 0.09, 0.08); o.connect(e); e.connect(d); o.start(t); o.stop(t + 0.1); });
 }
+// light hi-hat / crash (Android): filtered noise instead of six square oscillators per hit
+function rHatLite(t, d, v, open) {
+  const dur = open ? 0.32 : 0.055, s = noise(t, dur), hp = filt('highpass', 7000), bp = filt('bandpass', 10000, 0.8), n = env(t, 0.001, v * 0.25, dur, dur - 0.004);
+  s.connect(hp); hp.connect(bp); bp.connect(n); n.connect(d);
+}
+function rCrashLite(t, d, v) {
+  const hp = filt('highpass', 5000), n = env(t, 0.002, v * 0.4, 1.9, 1.85); hp.connect(n); n.connect(d);
+  const s = noise(t, 1.9); s.connect(hp);
+}
 function rHat(t, d, v, open) {
+  if (AUDIO_LITE) return rHatLite(t, d, v, open);
   const dur = open ? 0.32 : 0.055, bp = filt('bandpass', 10000, 0.8), n = env(t, 0.001, v * 0.18, dur, dur - 0.004);
   bp.connect(n); n.connect(d);
   METAL.forEach(r => { const o = osc('square', 40 * r * 1.6, t); o.connect(bp); o.start(t); o.stop(t + dur + 0.02); });
 }
 function rCrash(t, d, v) {
+  if (AUDIO_LITE) return rCrashLite(t, d, v);
   const hp = filt('highpass', 5000), n = env(t, 0.002, v * 0.3, 1.9, 1.85); hp.connect(n); n.connect(d);
   METAL.forEach(r => { const o = osc('square', 40 * r * 2.1, t); o.connect(hp); o.start(t); o.stop(t + 1.95); });
   const s = noise(t, 1.9), n2 = env(t, 0.002, v * 0.25, 1.6, 1.55); s.connect(n2); n2.connect(hp);
@@ -1584,7 +1623,7 @@ function calibCheck() {
   if (ds.length < 4) { calFails++; cal.msg = 'Слишком мало попаданий в такт — попробуй ещё раз'; return; }
   ds.sort((a, b) => a - b); const med = ds[Math.floor(ds.length / 2)];
   calOffset = clamp(med, 0, 0.35);
-  try { localStorage.setItem('dirizher_cal', String(calOffset)); } catch (e) {}
+  try { localStorage.setItem('dirizher_cal', String(calOffset)); if (IS_ANDROID) localStorage.setItem('zvukach_cal_mode', 'android50'); } catch (e) {}
   cal.ok = true; cal.msg = 'Задержка: ' + Math.round(calOffset * 1000) + ' мс — сохранено';
 }
 
@@ -2587,9 +2626,21 @@ function perfTick(dt) {
   const avg = PF.sum / PF.n; PF.n = PF.sum = 0;
   if (avg > 0.024) { QUAL--; try { localStorage.setItem('zvukach_q', String(QUAL)); } catch (e) {} resize(); PF.skip = 90; }
 }
+// audio watchdog: if the sound stream dies while the audio clock says "running" (seen on Android after overload),
+// the clock stops moving. Then stop the song, drop the dead context and let the next tap build a fresh one.
+const AW = { ct: 0, at: 0 };
+function audioWatch(tr) {
+  if (!A || A.ctx.state !== 'running' || (state !== 'play' && state !== 'count')) { AW.at = tr; AW.ct = A ? A.ctx.currentTime : 0; return; }
+  const ct = A.ctx.currentTime;
+  if (ct > AW.ct + 0.001) { AW.ct = ct; AW.at = tr; return; }
+  if (tr - AW.at < 2) return;
+  const dead = A; quitToMenu(); A = null; AW.at = tr; if (typeof prevBus !== 'undefined') prevBus = null;
+  try { dead.ctx.close().catch(() => {}); } catch (e) {}
+  menuMsg = { text: 'Звук сбился — перезапустили его. Запусти песню ещё раз', t0: rt() };
+}
 function frame() {
   requestAnimationFrame(frame);
-  const tr = rt(); perfTick(tr - lastFrame); lastFrame = tr;
+  const tr = rt(); perfTick(tr - lastFrame); lastFrame = tr; audioWatch(tr);
   const live = (state === 'play' || state === 'count') && run && A;
   if (live) {
     const R = run, t = aT();

@@ -2,7 +2,7 @@
 // Игра открывается из кэша мгновенно и без интернета; если есть сеть, новая версия
 // тихо подкачивается в фоне и включится при следующем запуске.
 // При каждом обновлении игры меняй номер версии ниже.
-const VERSION = 'zvukach-v5';
+const VERSION = 'zvukach-v6';
 const CORE = ['./', './index.html', './manifest.webmanifest', './icon-192.png', './icon-512.png', './apple-touch-icon.png'];
 
 self.addEventListener('install', e => {
