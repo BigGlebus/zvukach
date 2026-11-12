@@ -149,8 +149,35 @@ const PYRO = { x:724, y:300, r:34 };
 // ---------- canvas ----------
 const cv = document.getElementById('c');
 const g = cv.getContext('2d');
+// ---------- performance: quality level + sprite cache ----------
+// QUAL 2 — full sharpness (up to 2 canvas pixels per screen point), 1 — up to 1.5, 0 — 1x plus lighter effects.
+// The level drops by itself when frames come too slowly during a song and is remembered on the device.
+let QUAL = 2;
+try { const q = localStorage.getItem('zvukach_q'); if (q === '0' || q === '1') QUAL = +q; } catch (e) {}
+const SPR = new Map();   // pre-rendered pieces (musician bodies, guitars, crowd people) — drawn once, then just copied
+function sprite(key, x0, y0, w, h, k, draw) {
+  key += '|' + k;
+  let c = SPR.get(key);
+  if (!c) {
+    if (SPR.size > 400) SPR.clear();
+    c = document.createElement('canvas');
+    c.width = Math.max(1, Math.ceil(w * k)); c.height = Math.max(1, Math.ceil(h * k));
+    const sg = c.getContext('2d'); sg.scale(c.width / w, c.height / h); sg.translate(-x0, -y0); draw(sg);
+    SPR.set(key, c);
+    // an ImageBitmap stays ready on the GPU, so copying it every frame is cheaper than copying a canvas
+    if (window.createImageBitmap) createImageBitmap(c).then(b => { if (SPR.get(key) === c) SPR.set(key, b); }).catch(() => {});
+  }
+  return c;
+}
+// current drawing scale (canvas pixels per game unit), rounded so the cache stays small
+function curScale(gg, fallback) {
+  let k = fallback || cv.width / W;
+  if (gg.getTransform) { const m = gg.getTransform(); k = Math.hypot(m.a, m.b); }
+  return Math.max(0.1, Math.round(k * 20) / 20);
+}
 function resize() {
-  const dpr = Math.min(window.devicePixelRatio || 1, 2);
+  SPR.clear();
+  const dpr = Math.min(window.devicePixelRatio || 1, QUAL === 2 ? 2 : QUAL === 1 ? 1.5 : 1);
   const vw = window.innerWidth, vh = window.innerHeight;
   const s = Math.min(vw / W, vh / H);
   const cw = W * s, ch = H * s;
@@ -163,11 +190,21 @@ window.addEventListener('resize', resize);
 window.addEventListener('orientationchange', () => setTimeout(resize, 200));
 resize();
 
-function rr(x, y, w, h, r) {
+function rrOn(g, x, y, w, h, r) {
   r = Math.max(0, Math.min(r, w / 2, h / 2));
   g.beginPath(); g.moveTo(x + r, y);
   g.arcTo(x + w, y, x + w, y + h, r); g.arcTo(x + w, y + h, x, y + h, r);
   g.arcTo(x, y + h, x, y, r); g.arcTo(x, y, x + w, y, r); g.closePath();
+}
+function rr(x, y, w, h, r) { rrOn(g, x, y, w, h, r); }
+// largest font size (max → min) at which the text fits maxW; remembered once the fonts have loaded
+const FIT = new Map();
+function fitFont(text, max, min, maxW) {
+  const key = text + '|' + max + '|' + maxW; let fs = FIT.get(key);
+  if (fs !== undefined) return fs;
+  fs = max; g.font = fs + 'px ' + FD; while (fs > min && g.measureText(text).width > maxW) { fs--; g.font = fs + 'px ' + FD; }
+  if (!document.fonts || document.fonts.status === 'loaded') FIT.set(key, fs);
+  return fs;
 }
 function txt(s, x, y, font, col, align, base) {
   g.font = font; g.fillStyle = col; g.textAlign = align || 'left'; g.textBaseline = base || 'alphabetic'; g.fillText(s, x, y);
@@ -648,6 +685,7 @@ function firePyro() {
 }
 function spawnConfetti(n) {
   const cols = [C.yellow, C.blue, C.orange, C.text];
+  if (QUAL === 0) n = Math.ceil(n / 2);   // light mode: half the confetti
   for (let i = 0; i < n; i++) fx.confetti.push({ x: 80 + Math.random() * 690, y: 40 + Math.random() * 40, vx: (Math.random() - 0.5) * 60, vy: 30 + Math.random() * 80,
     r: Math.random() * 6, vr: (Math.random() - 0.5) * 8, c: cols[i % 4], t0: rt() });
   if (fx.confetti.length > 220) fx.confetti.splice(0, fx.confetti.length - 220);
@@ -1726,6 +1764,17 @@ const PEOPLE = [];
     }
   });
 })();
+// a person in the crowd (head + body) is drawn once per row and size, then copied — 84 people every frame
+function personSprite(p, k) {
+  if (p.sprK === k) { const c = SPR.get(p.sprKey); if (c) return c; }
+  const key = 'p|' + p.w + '|' + p.h + '|' + p.b + '|' + p.head + '|' + p.body;
+  p.sprK = k; p.sprKey = key + '|' + k;
+  return sprite(key, -2, -2, p.w + 4, p.h + p.b + 4, k, sg => {
+    sg.fillStyle = p.head; sg.beginPath(); sg.arc(p.w / 2, p.w * 0.23, p.w * 0.23, 0, Math.PI * 2); sg.fill();
+    rrOn(sg, 0, p.h * 0.44, p.w, p.h * 0.56 + p.b, p.w * 0.4); sg.fillStyle = p.body; sg.fill();
+  });
+}
+let VIGNETTE = null;   // low-hype red vignette, built once
 
 // ---------- drawing ----------
 // ---------- figures (style B: detailed, with faces) ----------
@@ -1776,6 +1825,66 @@ function fig(g, m, cx, foot, s, bob, aL, aR, V, t) {
   };
   const angHand = (sh, rot) => [sh[0] - 44 * Math.sin(rad(rot)), sh[1] + 44 * Math.cos(rad(rot))];
 
+  // --- body, head, hair and face: drawn once per look and size, then copied (only the singing mouth moves)
+  if (!O) {
+    const key = ['b', m.name || '', m.kind, m.shirt, m.hair, m.skin, m.back ? 1 : 0, m.short ? 1 : 0, V.chibi ? 1 : 0, V.face ? 1 : 0].join('|');
+    g.drawImage(sprite(key, -48, -190, 96, 196, curScale(g, s * cv.width / W), sg => figBody(sg, m, V, L, headR, headY, null)), -48, -190, 96, 196);
+  } else figBody(g, m, V, L, headR, headY, O);
+  if (V.face && !m.back && m.kind === 'vocal') { const open = 0.5 + 0.5 * Math.abs(Math.sin(t * Math.PI * 2)); g.fillStyle = '#5A1E22'; g.beginPath(); g.ellipse(0, headY + headR * 0.5, 3.2, 1.5 + open * 3.5, 0, 0, Math.PI * 2); g.fill(); }
+
+  // --- guitarists
+  if (isGtr && playing) {
+    const bass = m.kind === 'bass', model = bass ? V.bass : V.gtr;
+    const G = { x: -4, y: -68, a: rad(bass ? -24 : -22) };
+    const IS = bass ? 1.22 : 1.3, W = (gx, gy) => { gx *= IS; gy *= IS; return [G.x + gx * Math.cos(G.a) - gy * Math.sin(G.a), G.y + gx * Math.sin(G.a) + gy * Math.cos(G.a)]; };
+    const neckL = bass ? 80 : 60;
+    // strap across the chest, from the upper horn to the far shoulder
+    line([W(16, -11), [-14, -119]], 4.5, '#2A1E18');
+    arm(SR, W(neckL * (bass ? 0.58 : 0.75), 3), 'down');   // fretting arm goes behind the neck
+    g.save(); g.translate(G.x, G.y); g.rotate(G.a); g.scale(IS, IS);
+    instrDraw(g, model, m.inst, neckL, U, F, O);
+    g.restore();
+    const strum = V.game ? clamp((aR - 34) / 8, -1, 1) * 5 : Math.sin(t * Math.PI * 2 * (bass ? 2 : 4)) * 5;
+    arm(SL, W(-6, -3 + strum), 'out');                                   // picking hand over the pickups
+  } else if (isGtr) {     // hands down (string broke / idle)
+    const G = { x: -2, y: -66, a: rad(-12) };
+    g.save(); g.translate(G.x, G.y); g.rotate(G.a); g.scale(1.25, 1.25); instrDraw(g, m.kind === 'bass' ? V.bass : V.gtr, m.inst, m.kind === 'bass' ? 80 : 60, U, F, O); g.restore();
+    arm(SL, angHand(SL, aL), 'out'); arm(SR, angHand(SR, aR), 'out');
+  }
+
+  // --- drums: kit in front of the drummer
+  if (m.kind === 'drums') {
+    const hl = angHand(SL, aL), hr = angHand(SR, aR);
+    const stick = (h, rot, dir) => { const a = rad(rot) + dir * 1.15, x2 = h[0] - 40 * Math.sin(a), y2 = h[1] + 40 * Math.cos(a); line([h, [x2, y2]], 3.2, '#E8C9A0'); };
+    // stands & cymbals behind
+    line([[-74, 0], [-74, -88]], 2.5, '#8A8399'); line([[76, 0], [72, -112]], 2.5, '#8A8399');
+    U([[pE(66, -114, 22, 4, -0.18), '#D9B44A']]);
+    U([[pE(-74, -86, 17, 3.2), '#D9B44A'], [pE(-74, -82, 17, 3.2), '#C9A23E']]);
+    // floor tom, snare, kick, rack toms
+    U([[pRR(30, -58, 40, 28, 4), '#C64A3A'], [pE(50, -58, 20, 5.5), '#E9E4F2']]); line([[34, -30], [32, 0]], 2.2, '#8A8399'); line([[66, -30], [68, 0]], 2.2, '#8A8399');
+    U([[pRR(-66, -62, 38, 13, 3), '#B9B2C6'], [pE(-47, -62, 19, 5), '#E9E4F2']]); line([[-47, -49], [-47, 0]], 2.2, '#8A8399');
+    U([[pE(0, -36, 37, 37), '#C64A3A']]); F(pE(0, -36, 31, 31), '#E9E4F2');
+    g.strokeStyle = '#FF8A1F'; g.lineWidth = 4; g.beginPath(); g.arc(0, -36, 18, 0, Math.PI * 2); g.stroke();
+    g.fillStyle = '#FF8A1F'; g.font = '800 15px Inter, sans-serif'; g.textAlign = 'center'; g.textBaseline = 'middle'; g.fillText('З', 0, -35);
+    U([[pRR(-34, -86, 26, 14, 4), '#C64A3A'], [pE(-21, -86, 13, 4.5), '#E9E4F2'], [pRR(8, -86, 26, 14, 4), '#C64A3A'], [pE(21, -86, 13, 4.5), '#E9E4F2']]);
+    arm(SL, hl, 'out'); arm(SR, hr, 'out'); stick(hl, aL, -1); stick(hr, aR, 1);
+  }
+  // --- vocalist: mic stand
+  if (m.kind === 'vocal') {
+    arm(SL, angHand(SL, aL), 'out'); arm(SR, angHand(SR, aR), 'out');      // arms behind the mic stand
+    line([[40, 0], [32, 2]], 2.5, '#8A8399'); line([[40, 0], [48, 2]], 2.5, '#8A8399');
+    line([[40, 0], [40, -112]], 3, '#8A8399'); line([[40, -112], [30, -122]], 3, '#8A8399');
+    U([[pRR(22, -131, 10, 14, 5), '#3A3446']]); g.fillStyle = 'rgba(255,255,255,.25)'; g.fillRect(24, -129, 2, 9);
+  }
+  if (m.kind === 'none' || m.kind === 'fan') { arm(SL, angHand(SL, aL), 'out'); arm(SR, angHand(SR, aR), 'out'); }
+  g.restore();
+}
+
+// body, legs, head, hair and face of a figure (everything except arms, instruments and the singing mouth)
+function figBody(g, m, V, L, headR, headY, O) {
+  const LW = 2.4;
+  const U = (items) => { if (O) { g.strokeStyle = O; g.lineWidth = LW * 2; g.lineJoin = 'round'; items.forEach(([p]) => g.stroke(p)); } items.forEach(([p, c]) => { g.fillStyle = c; g.fill(p); }); };
+  const F = (p, c) => U([[p, c]]);
   // --- long hair behind the body
   if (L.hair === 'long') F(pRR(-headR - 4, headY - headR * 0.4, headR * 2 + 8, (V.chibi ? 70 : 62), 12), m.hair);
   if (L.hair === 'shag') F(pRR(-headR - 3, headY - headR * 0.3, headR * 2 + 6, (V.chibi ? 46 : 40), 10), m.hair);
@@ -1813,58 +1922,20 @@ function fig(g, m, cx, foot, s, bob, aL, aR, V, t) {
     const ey = headY + 2, ex = headR * 0.36, er = V.chibi ? 3.4 : 2;
     if (!L.shades) { g.fillStyle = '#1A1420'; [-ex, ex].forEach(x => { g.beginPath(); g.ellipse(x, ey, er, er * 1.2, 0, 0, Math.PI * 2); g.fill(); });
       if (V.chibi) { g.fillStyle = '#fff'; [-ex, ex].forEach(x => { g.beginPath(); g.arc(x + 1, ey - 1.4, 1.1, 0, Math.PI * 2); g.fill(); }); } }
-    const singing = m.kind === 'vocal', open = singing ? 0.5 + 0.5 * Math.abs(Math.sin(t * Math.PI * 2)) : 0;
-    if (singing) { g.fillStyle = '#5A1E22'; g.beginPath(); g.ellipse(0, headY + headR * 0.5, 3.2, 1.5 + open * 3.5, 0, 0, Math.PI * 2); g.fill(); }
-    else { g.strokeStyle = '#5A3A30'; g.lineWidth = 1.5; g.lineCap = 'round'; g.beginPath(); g.arc(0, headY + headR * 0.35, 4.5, 0.25 * Math.PI, 0.75 * Math.PI); g.stroke(); }
+    // the singing mouth moves every frame, so it is drawn by fig() on top of the cached body
+    if (m.kind !== 'vocal') { g.strokeStyle = '#5A3A30'; g.lineWidth = 1.5; g.lineCap = 'round'; g.beginPath(); g.arc(0, headY + headR * 0.35, 4.5, 0.25 * Math.PI, 0.75 * Math.PI); g.stroke(); }
     if (m.name === 'Лиза') { g.fillStyle = 'rgba(255,110,120,.28)'; [-headR * 0.55, headR * 0.55].forEach(x => { g.beginPath(); g.ellipse(x, headY + headR * 0.3, 3.5, 2.2, 0, 0, Math.PI * 2); g.fill(); }); }
   }
+}
 
-  // --- guitarists
-  if (isGtr && playing) {
-    const bass = m.kind === 'bass', model = bass ? V.bass : V.gtr;
-    const G = { x: -4, y: -68, a: rad(bass ? -24 : -22) };
-    const IS = bass ? 1.22 : 1.3, W = (gx, gy) => { gx *= IS; gy *= IS; return [G.x + gx * Math.cos(G.a) - gy * Math.sin(G.a), G.y + gx * Math.sin(G.a) + gy * Math.cos(G.a)]; };
-    const neckL = bass ? 80 : 60;
-    // strap across the chest, from the upper horn to the far shoulder
-    line([W(16, -11), [-14, -119]], 4.5, '#2A1E18');
-    arm(SR, W(neckL * (bass ? 0.58 : 0.75), 3), 'down');   // fretting arm goes behind the neck
-    g.save(); g.translate(G.x, G.y); g.rotate(G.a); g.scale(IS, IS);
-    drawInstrument(g, model, m.inst, neckL, U, F, O);
-    g.restore();
-    const strum = V.game ? clamp((aR - 34) / 8, -1, 1) * 5 : Math.sin(t * Math.PI * 2 * (bass ? 2 : 4)) * 5;
-    arm(SL, W(-6, -3 + strum), 'out');                                   // picking hand over the pickups
-  } else if (isGtr) {     // hands down (string broke / idle)
-    const G = { x: -2, y: -66, a: rad(-12) };
-    g.save(); g.translate(G.x, G.y); g.rotate(G.a); g.scale(1.25, 1.25); drawInstrument(g, m.kind === 'bass' ? V.bass : V.gtr, m.inst, m.kind === 'bass' ? 80 : 60, U, F, O); g.restore();
-    arm(SL, angHand(SL, aL), 'out'); arm(SR, angHand(SR, aR), 'out');
-  }
-
-  // --- drums: kit in front of the drummer
-  if (m.kind === 'drums') {
-    const hl = angHand(SL, aL), hr = angHand(SR, aR);
-    const stick = (h, rot, dir) => { const a = rad(rot) + dir * 1.15, x2 = h[0] - 40 * Math.sin(a), y2 = h[1] + 40 * Math.cos(a); line([h, [x2, y2]], 3.2, '#E8C9A0'); };
-    // stands & cymbals behind
-    line([[-74, 0], [-74, -88]], 2.5, '#8A8399'); line([[76, 0], [72, -112]], 2.5, '#8A8399');
-    U([[pE(66, -114, 22, 4, -0.18), '#D9B44A']]);
-    U([[pE(-74, -86, 17, 3.2), '#D9B44A'], [pE(-74, -82, 17, 3.2), '#C9A23E']]);
-    // floor tom, snare, kick, rack toms
-    U([[pRR(30, -58, 40, 28, 4), '#C64A3A'], [pE(50, -58, 20, 5.5), '#E9E4F2']]); line([[34, -30], [32, 0]], 2.2, '#8A8399'); line([[66, -30], [68, 0]], 2.2, '#8A8399');
-    U([[pRR(-66, -62, 38, 13, 3), '#B9B2C6'], [pE(-47, -62, 19, 5), '#E9E4F2']]); line([[-47, -49], [-47, 0]], 2.2, '#8A8399');
-    U([[pE(0, -36, 37, 37), '#C64A3A']]); F(pE(0, -36, 31, 31), '#E9E4F2');
-    g.strokeStyle = '#FF8A1F'; g.lineWidth = 4; g.beginPath(); g.arc(0, -36, 18, 0, Math.PI * 2); g.stroke();
-    g.fillStyle = '#FF8A1F'; g.font = '800 15px Inter, sans-serif'; g.textAlign = 'center'; g.textBaseline = 'middle'; g.fillText('З', 0, -35);
-    U([[pRR(-34, -86, 26, 14, 4), '#C64A3A'], [pE(-21, -86, 13, 4.5), '#E9E4F2'], [pRR(8, -86, 26, 14, 4), '#C64A3A'], [pE(21, -86, 13, 4.5), '#E9E4F2']]);
-    arm(SL, hl, 'out'); arm(SR, hr, 'out'); stick(hl, aL, -1); stick(hr, aR, 1);
-  }
-  // --- vocalist: mic stand
-  if (m.kind === 'vocal') {
-    arm(SL, angHand(SL, aL), 'out'); arm(SR, angHand(SR, aR), 'out');      // arms behind the mic stand
-    line([[40, 0], [32, 2]], 2.5, '#8A8399'); line([[40, 0], [48, 2]], 2.5, '#8A8399');
-    line([[40, 0], [40, -112]], 3, '#8A8399'); line([[40, -112], [30, -122]], 3, '#8A8399');
-    U([[pRR(22, -131, 10, 14, 5), '#3A3446']]); g.fillStyle = 'rgba(255,255,255,.25)'; g.fillRect(24, -129, 2, 9);
-  }
-  if (m.kind === 'none' || m.kind === 'fan') { arm(SL, angHand(SL, aL), 'out'); arm(SR, angHand(SR, aR), 'out'); }
-  g.restore();
+// guitar drawn once per model/colour/size into a sprite, then copied (rotation and position stay live)
+function instrDraw(g, model, col, neckL, U, F, O) {
+  if (O) return drawInstrument(g, model, col, neckL, U, F, O);
+  const x0 = -38, y0 = -24, w = neckL + 62, h = 48;
+  g.drawImage(sprite('i|' + model + '|' + col + '|' + neckL, x0, y0, w, h, curScale(g), sg => {
+    const U1 = items => items.forEach(([p, c]) => { sg.fillStyle = c; sg.fill(p); });
+    drawInstrument(sg, model, col, neckL, U1, (p, c) => U1([[p, c]]), null);
+  }), x0, y0, w, h);
 }
 
 // guitar in its own frame: x runs along the neck (towards the headstock), body centred at 0
@@ -1936,12 +2007,12 @@ function drawScene(songT, hype, live, tr) {
   // banner
   if (live) {             // in play the LED banner is the tap lane; the band name runs small on top
     rr(212, 50, 420, 50, 6); g.fillStyle = '#120E1A'; g.fill(); g.strokeStyle = hype > 35 ? 'rgba(255,211,77,' + (0.25 + 0.35 * pulse * hk).toFixed(3) + ')' : '#2B2338'; g.lineWidth = 2; g.stroke();
-    const bn = (BAND_SET ? BAND : 'ЗВУКАЧ').toUpperCase(); let fs = 11; g.font = fs + 'px ' + FD; while (fs > 8 && g.measureText(bn).width > 380) { fs--; g.font = fs + 'px ' + FD; }
+    const bn = (BAND_SET ? BAND : 'ЗВУКАЧ').toUpperCase(), fs = fitFont(bn, 11, 8, 380);
     txt(bn, W / 2, 60, fs + 'px ' + FD, hype > 35 ? 'rgba(255,211,77,.55)' : '#5C5468', 'center', 'middle');
   } else {
     rr(282, 54, 280, 42, 5); g.fillStyle = '#120E1A'; g.fill(); g.strokeStyle = '#2B2338'; g.lineWidth = 2; g.stroke();
-    if (hype > 35) { g.shadowColor = 'rgba(255,211,77,.8)'; g.shadowBlur = 8 + 10 * pulse * hk; }
-    { const bn = (BAND_SET ? BAND : 'ЗВУКАЧ').toUpperCase(); let fs = 21; g.font = fs + 'px ' + FD; while (fs > 11 && g.measureText(bn).width > 262) { fs--; g.font = fs + 'px ' + FD; } txt(bn, W / 2, 76, fs + 'px ' + FD, hype > 35 ? C.yellow : '#5C5468', 'center', 'middle'); }
+    if (hype > 35 && QUAL > 0) { g.shadowColor = 'rgba(255,211,77,.8)'; g.shadowBlur = 8 + 10 * pulse * hk; }
+    { const bn = (BAND_SET ? BAND : 'ЗВУКАЧ').toUpperCase(), fs = fitFont(bn, 21, 11, 262); txt(bn, W / 2, 76, fs + 'px ' + FD, hype > 35 ? C.yellow : '#5C5468', 'center', 'middle'); }
     g.shadowBlur = 0;
   }
   // stage floor
@@ -1966,11 +2037,13 @@ function drawScene(songT, hype, live, tr) {
   const fogA = live && run.fogT > 0 ? tr - run.fogT : 99;
   if (fogA < 9) {
     const grow = Math.min(1, fogA / 1.6), fade = fogA > 6 ? Math.max(0, 1 - (fogA - 6) / 3) : 1;
+    const fogA_ = (QUAL > 0 ? 0.17 : 0.26) * fade;   // light mode: half the puffs (both sides), a bit denser
     for (let k = 0; k < 18; k++) {
+      if (QUAL === 0 && (k >> 1) % 2) continue;
       const side = k % 2 ? 1 : -1, d = (k >> 1) / 9, reach = grow * (0.3 + d * 0.7);
       const x = side < 0 ? -40 + reach * 470 : W + 40 - reach * 470, y = 262 + Math.sin(k * 1.7) * 22 + Math.sin(tr * 0.7 + k) * 6;
       const rx = 70 + (k % 5) * 14 + grow * 20, ry = 26 + (k % 3) * 8;
-      g.fillStyle = 'rgba(214,206,236,' + (0.17 * fade).toFixed(3) + ')'; g.beginPath(); g.ellipse(x + Math.sin(tr * 0.4 + k) * 12, y, rx, ry, 0, 0, Math.PI * 2); g.fill();
+      g.fillStyle = 'rgba(214,206,236,' + fogA_.toFixed(3) + ')'; g.beginPath(); g.ellipse(x + Math.sin(tr * 0.4 + k) * 12, y, rx, ry, 0, 0, Math.PI * 2); g.fill();
     }
   }
   // musicians
@@ -2037,6 +2110,7 @@ function drawScene(songT, hype, live, tr) {
   drawSplats(false, tr);
   // crowd
   g.fillStyle = '#0B0910'; g.fillRect(0, 300, W, 90);
+  const crowdK = curScale(g);
   PEOPLE.forEach(p => {
     const target = hype >= p.leave ? 1 : 0; p.a += (target - p.a) * 0.05; if (p.a < 0.02) return;
     const jph = ((songT / BEAT + p.ph) % 1 + 1) % 1;
@@ -2052,8 +2126,7 @@ function drawScene(songT, hype, live, tr) {
         circle(fx_, fy, 7, 'rgba(255,190,80,.25)'); g.fillStyle = '#FFB648'; g.beginPath(); g.ellipse(fx_, fy - 2, 2.4, fl, 0, 0, Math.PI * 2); g.fill(); }
       if (p.phone && hype > 78) { circle(p.x + p.w * 1.05 + wave, top - p.h * 0.18, 6, 'rgba(255,243,176,.25)'); g.fillStyle = '#FFF3B0'; g.fillRect(p.x + p.w * 1.05 + wave - 2.5, top - p.h * 0.18 - 3.5, 5, 7); }
     }
-    circle(p.x + p.w / 2, top + p.w * 0.23, p.w * 0.23, p.head);
-    rr(p.x, y0 - p.h * 0.56, p.w, p.h * 0.56 + p.b, p.w * 0.4); g.fillStyle = p.body; g.fill();
+    g.drawImage(personSprite(p, crowdK), p.x - 2, top - 2, p.w + 4, p.h + p.b + 4);
   });
   g.globalAlpha = 1;
   // conductor
@@ -2068,9 +2141,9 @@ function drawScene(songT, hype, live, tr) {
   });
   // low-hype vignette
   if (hype < 30) {
-    const k = (30 - hype) / 30, grd = g.createRadialGradient(W / 2, H * 0.55, H * 0.35, W / 2, H * 0.55, W * 0.65);
-    grd.addColorStop(0, 'rgba(0,0,0,0)'); grd.addColorStop(1, 'rgba(90,10,10,' + (0.55 * k).toFixed(3) + ')');
-    g.fillStyle = grd; g.fillRect(0, 0, W, H);
+    const k = (30 - hype) / 30;
+    if (!VIGNETTE) { VIGNETTE = g.createRadialGradient(W / 2, H * 0.55, H * 0.35, W / 2, H * 0.55, W * 0.65); VIGNETTE.addColorStop(0, 'rgba(90,10,10,0)'); VIGNETTE.addColorStop(1, 'rgba(90,10,10,1)'); }
+    g.globalAlpha = 0.55 * k; g.fillStyle = VIGNETTE; g.fillRect(0, 0, W, H); g.globalAlpha = 1;
   }
   // blackout: only phone lights in the crowd
   if (live && run.darkUntilBeat) {
@@ -2503,9 +2576,20 @@ function drawCostume(tr) {
 
 // ---------- main loop ----------
 let lastFrame = rt();
+// auto quality: during a song, if frames keep coming slower than ~42 per second, step the quality down (and remember it)
+const PF = { n: 0, sum: 0, skip: 90 };
+function perfTick(dt) {
+  if (state !== 'play' || !run || QUAL === 0 || document.hidden) { PF.n = PF.sum = 0; PF.skip = Math.max(PF.skip, 45); return; }
+  if (PF.skip > 0) { PF.skip--; return; }      // let the song settle first
+  if (dt > 0.25) return;                       // a hiccup (tab switch, GC), not steady slowness
+  PF.sum += dt; PF.n++;
+  if (PF.n < 120) return;
+  const avg = PF.sum / PF.n; PF.n = PF.sum = 0;
+  if (avg > 0.024) { QUAL--; try { localStorage.setItem('zvukach_q', String(QUAL)); } catch (e) {} resize(); PF.skip = 90; }
+}
 function frame() {
   requestAnimationFrame(frame);
-  const tr = rt(); lastFrame = tr;
+  const tr = rt(); perfTick(tr - lastFrame); lastFrame = tr;
   const live = (state === 'play' || state === 'count') && run && A;
   if (live) {
     const R = run, t = aT();
