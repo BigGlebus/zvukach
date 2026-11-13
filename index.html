@@ -42,7 +42,7 @@
 // ---------- constants ----------
 const W = 844, H = 390;
 // game version, shown small in the corner of the title screen and the menu. Bump it together with VERSION in sw.js
-const APP_VERSION = 'v11';
+const APP_VERSION = 'v12';
 let BPM = 120, BEAT = 60 / BPM, STEP = BEAT / 4, BAR = BEAT * 4;
 const C = { bg:'#0E0B14', wall:'#15111D', text:'#F4F1FA', muted:'#A69FB8', blue:'#6CC2FF', orange:'#FF8A1F',
   warn:'#FFA94D', bad:'#FF6B5E', yellow:'#FFD34D', tomato:'#E5372B', splat:'#D8301F' };
@@ -2863,6 +2863,20 @@ requestAnimationFrame(frame);
 <script>
 if ('serviceWorker' in navigator && location.protocol.startsWith('http')) {
   window.addEventListener('load', () => navigator.serviceWorker.register('sw.js').catch(() => {}));
+  // A new version took over (sw.js does skipWaiting + clients.claim): reload into it as soon as no song is running.
+  // Without this the old version stays on screen until the next launch. The very first install fires this event too,
+  // so only reload when a version was already running; never mid-song or while the band-name dialog is open.
+  const hadSW = !!navigator.serviceWorker.controller;
+  let reloadPending = false;
+  navigator.serviceWorker.addEventListener('controllerchange', () => {
+    if (!hadSW || reloadPending) return;
+    reloadPending = true;
+    const tryReload = () => {
+      if ((state === 'title' || state === 'menu') && !bandDlg.classList.contains('on')) location.reload();
+      else setTimeout(tryReload, 1000);
+    };
+    tryReload();
+  });
 }
 </script>
 </body>
