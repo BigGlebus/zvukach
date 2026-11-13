@@ -42,7 +42,7 @@
 // ---------- constants ----------
 const W = 844, H = 390;
 // game version, shown small in the corner of the title screen and the menu. Bump it together with VERSION in sw.js
-const APP_VERSION = 'v10';
+const APP_VERSION = 'v11';
 let BPM = 120, BEAT = 60 / BPM, STEP = BEAT / 4, BAR = BEAT * 4;
 const C = { bg:'#0E0B14', wall:'#15111D', text:'#F4F1FA', muted:'#A69FB8', blue:'#6CC2FF', orange:'#FF8A1F',
   warn:'#FFA94D', bad:'#FF6B5E', yellow:'#FFD34D', tomato:'#E5372B', splat:'#D8301F' };
@@ -658,21 +658,23 @@ function feedbackBad(p, label, shake) {
 }
 function breakCombo() { const R = run; if (R.combo >= 8) popup('комбо сброшено', C.bad, W / 2, 150, 13); R.combo = 0; }
 
-// ---- difficulty knobs, tuned with a song simulator (bots tapping with a given spread, with/without events) so that:
-// no taps / random spam / steady off-beat → 0★; tapping every beat ignoring the chords, or skipping 30% → 1★;
-// chords ±90 ms, or precise but ignoring events → 2★; chords ±50 ms or better AND handling the events → 3★.
+// ---- difficulty knobs, tuned with a song simulator (bots tapping with a given spread, with/without events) so that
+// the rhythm decides the stars: no taps / random taps / only events / every beat ignoring the chords → 0–1★;
+// chords ±90 ms → 2★; chords ±50 ms or better AND handling the events → 3★. Events alone can't buy a star.
 const DIFF = {
   wP: 0.05, wPk: 0.14,      // «ИДЕАЛЬНО»: within min(wP, BEAT*wPk) of the chord
   wG: 0.11, wGk: 0.32,      // «ХОРОШО»:  within min(wG, BEAT*wGk)
   goodW: 0.5,               // a «good» counts as half a hit for accuracy
-  offW: 0.5,                // each tap away from any chord adds this much to the accuracy denominator
-  hypeP: 1.8, hypeG: 0.6,   // hype for a hit
-  hypeMiss: -1.5,           // hype for a chord with no tap / a tap too early or late
-  hypeOff: -1.5,            // hype for a tap away from any chord
-  hypeW: 0.25,              // stars: share of the average hype
-  evW: 0.25,                // stars: share of the events handled (the rest, 0.5, is accuracy)
-  s3: 0.85, s2: 0.42, s1: 0.2,    // stars: thresholds for 3 / 2 / 1
+  offW: 1,                  // each tap away from any chord counts against accuracy like a missed chord
+  hypeP: 1.5, hypeG: 0.4,   // hype for a hit
+  hypeMiss: -2,             // hype for a chord with no tap / a tap too early or late
+  hypeOff: -2,              // hype for a tap away from any chord
+  evHype: 0.5,              // event bonuses to hype are scaled by this — the crowd follows the rhythm first
+  evK: 0.15,                // stars: events the player let slip cut the score by up to this share
+  s3: 0.72, ev3: 0.7,       // 3★: score from 0.72 AND at least 70% of the events handled
+  s2: 0.5, s1: 0.3,         // 2★ / 1★: score thresholds (the score is the accuracy, cut a little for missed events)
 };
+const evHype = v => addHype(v * DIFF.evHype);
 // lag: how long ago the finger actually touched (see tapLag) — the tap is judged at the touch moment
 // lenient: true — the fire button (credits the chorus chord within 0.4 s); 'soft' — a solo pick (counts only if on a chord, never punished)
 function beatTap(p, mi, pid, lenient, lag) {
@@ -680,7 +682,7 @@ function beatTap(p, mi, pid, lenient, lag) {
   if (state !== 'play') return;
   // event: vocal solo rescue (any timing)
   if (mi === 3 && R.bridgeWindow && !R.vocalSolo) {
-    R.vocalSolo = true; R.bridgeWindow = false; addHype(10); R.mFlash[3] = rt();
+    R.vocalSolo = true; R.bridgeWindow = false; evHype(10); R.mFlash[3] = rt();
     popup((vocMale() ? 'ГЛЕБ' : 'ЛИЗА') + ' ПОЁТ СОЛО!', C.yellow, W / 2, 200, 24); toast((vocMale() ? 'ГЛЕБ СПАС' : 'ЛИЗА СПАСЛА') + ' БРИДЖ!', C.blue);
     cheer(0.9); spawnConfetti(30); haptic(30); burst(MUS[3].x, MUS[3].foot - 60, C.yellow, false);
     if (R.mode === 'tut') { R.toast = null; tutOk(); }
@@ -688,7 +690,7 @@ function beatTap(p, mi, pid, lenient, lag) {
   }
   if (R.mode === 'main' && R.soloWindow && R.soloBy < 0 && mi >= 0 && (mi === 3 || mi === (R.broken === 1 ? 0 : 1))) {
     lenient = lenient || 'soft';
-    R.soloBy = mi; R.soloWindow = false; evOk(); if (R.fh) R.fh.string = false; addHype(10); R.mFlash[mi] = rt(); R.score += 1000;
+    R.soloBy = mi; R.soloWindow = false; evOk(); if (R.fh) R.fh.string = false; evHype(10); R.mFlash[mi] = rt(); R.score += 1000;
     popup(mi === 3 ? nm(3).toUpperCase() + (vocMale() ? ' ПОЁТ' : ' ПОЁТ') + ' СОЛО!' : nm(mi).toUpperCase() + ' ИГРАЕТ СОЛО!', C.yellow, W / 2, 200, 24);
     cheer(0.9); spawnConfetti(30); haptic(30); burst(MUS[mi].x, MUS[mi].foot - 60, C.yellow, false);
   }
@@ -759,8 +761,8 @@ function firePyro() {
   R.charges--;
   const t = aT(), ok = pyroBars().some(pb => Math.abs(t - (R.songStart + pb * BAR)) < 0.4), lit = SONG.fog;
   if (lit) { R.fogT = rt(); fogSound(); } else { R.pyroT = rt(); pyroSound(); }
-  if (ok) { addHype(15); R.score += 2000 * multOf(R.combo); popup(lit ? 'ТУМАН!' : 'ОГОНЬ В ТОЧКУ!', C.yellow, W / 2, 200, 24); cheer(lit ? 0.6 : 1); if (!lit) spawnConfetti(60); }
-  else { addHype(2); popup(lit ? 'туман мимо припева' : 'огонь мимо припева', C.warn, W / 2, 200, 15); if (!lit) spawnConfetti(12); }
+  if (ok) { evHype(15); R.score += 2000 * multOf(R.combo); popup(lit ? 'ТУМАН!' : 'ОГОНЬ В ТОЧКУ!', C.yellow, W / 2, 200, 24); cheer(lit ? 0.6 : 1); if (!lit) spawnConfetti(60); }
+  else { popup(lit ? 'туман мимо припева' : 'огонь мимо припева', C.warn, W / 2, 200, 15); if (!lit) spawnConfetti(12); }
 }
 function spawnConfetti(n) {
   const cols = [C.yellow, C.blue, C.orange, C.text];
@@ -788,14 +790,15 @@ function finish() {
   const acc = clamp((R.perfect + R.good * DIFF.goodW) / Math.max(1, (SONG.accent ? R.targets.length : R.reqTot) + (R.offTaps || 0) * DIFF.offW), 0, 1);
   const hAvg = R.hypeN ? R.hypeSum / R.hypeN : R.hype;
   const evs = R.evTotal ? clamp(R.evDone / R.evTotal, 0, 1) : 1;
-  const m = DIFF.hypeW * hAvg / 100 + DIFF.evW * evs + (1 - DIFF.hypeW - DIFF.evW) * acc;
-  const stars = m > DIFF.s3 ? 3 : m > DIFF.s2 ? 2 : m > DIFF.s1 ? 1 : 0;
+  // the rhythm decides: the score is the accuracy, cut by up to evK for events that slipped; 3★ also needs most of the events
+  const m = acc * (R.evTotal ? 1 - DIFF.evK * (1 - evs) : 1);
+  const stars = m >= DIFF.s3 && evs >= DIFF.ev3 ? 3 : m >= DIFF.s2 ? 2 : m >= DIFF.s1 ? 1 : 0;
   const verdict = stars === 3 ? 'Толпа требует на бис!' : stars === 2 ? 'Хороший концерт, но можно жарче' : stars === 1 ? 'Ну такое… зал наполовину пуст' : 'Тебя закидали помидорами';
   if (CONCERT) { concertSongDone({ i: SONG_I, acc, hAvg, perf: m, stars, hype: R.hype }); if (stars >= 2) cheer(1.2); else boo(); return; }
   const before = ORDER.filter(unlocked).length;
   if (stars > (BEST[SONG_I] || 0)) { BEST[SONG_I] = stars; try { localStorage.setItem('zvukach_best', JSON.stringify(BEST)); } catch (e) {} }
   const opened = ORDER.filter(unlocked).length > before ? SONGS[ORDER[before]].title : null;
-  result = { score: R.score, maxCombo: R.maxCombo, acc, hype: R.hype, hAvg, evDone: R.evDone || 0, evTotal: R.evTotal || 0, stars, verdict, stats: R.stats, opened, need2: stars < 2 && !unlocked(ORDER[ORDER.indexOf(SONG_I) + 1] ?? -1) };
+  result = { score: R.score, maxCombo: R.maxCombo, acc, m, hype: R.hype, hAvg, evDone: R.evDone || 0, evTotal: R.evTotal || 0, stars, verdict, stats: R.stats, opened, need2: stars < 2 && !unlocked(ORDER[ORDER.indexOf(SONG_I) + 1] ?? -1) };
   if (stars >= 2) cheer(1.2); else boo();
   A.crowdBus.gain.setTargetAtTime(stars >= 2 ? 0.08 : 0.015, now(), 1.0);
 }
@@ -1325,7 +1328,7 @@ function kickFan(f) {
   const R = run, tr = rt(), q = fanPos(f, tr);
   f.state = 'kicked'; f.tk = tr; f.kx = q.x; f.ky = q.y;
   fx.boots.push({ x: q.x - f.side * 26, y: q.y - 20, side: f.side, t0: tr });
-  kickSnd(); haptic(25); R.stats.fans++; evOk(); if (R.fh && !fx.fans.some(q => q.state === 'run')) R.fh.fan = false; addHype(4); R.score += 500 * multOf(R.combo); cheer(0.5);
+  kickSnd(); haptic(25); R.stats.fans++; evOk(); if (R.fh && !fx.fans.some(q => q.state === 'run')) R.fh.fan = false; evHype(4); R.score += 500 * multOf(R.combo); cheer(0.5);
   popup('ПИНОК!', C.orange, q.x, q.y - 70, 22);
 }
 function updateFans(tr) {
@@ -1426,8 +1429,8 @@ const objAt = p => { const tr = rt(); return fx.objs.find(o => { if (o.state !==
 function catchObj(o) {
   const R = run, tr = rt(), q = objPos(o, tr); o.state = 'caught'; o.tc = tr; o.cx = q.x; o.cy = q.y;
   blip(1100, 0.12); haptic(20); burst(q.x, q.y, C.yellow, false);
-  if (o.kind === 'stick') { R.stats.sticks++; addHype(4); R.score += 600; popup('ТРЮК!', C.yellow, q.x, q.y - 30, 22); cheer(0.6); }
-  else { R.stats.gifts++; addHype(3); R.score += 400; popup('ПОЙМАЛ!', C.yellow, q.x, q.y - 30, 20); cheer(0.4); }
+  if (o.kind === 'stick') { R.stats.sticks++; evHype(4); R.score += 600; popup('ТРЮК!', C.yellow, q.x, q.y - 30, 22); cheer(0.6); }
+  else { R.stats.gifts++; evHype(3); R.score += 400; popup('ПОЙМАЛ!', C.yellow, q.x, q.y - 30, 20); cheer(0.4); }
 }
 const techAt = p => { const t = fx.tech; if (!t || t.state !== 'wait') return false; return Math.abs(p.x - techX(rt())) < 36 && p.y > 200 && p.y < 300; };
 function techX(tr) { const t = fx.tech; if (!t) return W + 40; if (t.state === 'wait') return W - 40 - Math.min(1, (tr - t.t0) / 0.6) * 10;
@@ -1435,7 +1438,7 @@ function techX(tr) { const t = fx.tech; if (!t) return W + 40; if (t.state === '
 function sendTech() { const R = run; fx.tech.state = 'run'; fx.tech.t1 = rt(); R.strap.state = 'run'; blip(800, 0.1); haptic(15); popup('БЕГУ!', C.blue, W - 60, 190, 14); }
 function diveTap() {
   const R = run, d = R.dive, dt = aT() - d.jumpT;
-  if (Math.abs(dt) < 0.5) { d.state = 'air'; d.t1 = rt(); R.stats.dives++; evOk(); if (R.fh) R.fh.dive = false; addHype(7); R.score += 1200; popup('В ТОЛПУ!', C.yellow, MUS[3].x, MUS[3].foot - 140, 24); kickSnd(); cheer(1); haptic(30); }
+  if (Math.abs(dt) < 0.5) { d.state = 'air'; d.t1 = rt(); R.stats.dives++; evOk(); if (R.fh) R.fh.dive = false; evHype(7); R.score += 1200; popup('В ТОЛПУ!', C.yellow, MUS[3].x, MUS[3].foot - 140, 24); kickSnd(); cheer(1); haptic(30); }
   else { d.state = 'fail'; d.t1 = rt(); addHype(-3); popup(dt < 0 ? 'рано — ой…' : 'поздно — ой…', C.warn, MUS[3].x, MUS[3].foot - 140, 16); thudSnd(); }
 }
 function updateEvents(tr) {
@@ -1470,7 +1473,7 @@ function updateEvents(tr) {
   if (sp) {
     if (sp.state === 'down' && tr > sp.until) { sp.state = 'late'; sp.t1 = tr; addHype(-4); toast('ТЕХНИК ОПОЗДАЛ — ТАПАЙ ПО НЕМУ СРАЗУ', C.bad); fx.tech.state = 'run'; fx.tech.t1 = tr; }
     if ((sp.state === 'run' || sp.state === 'late') && tr - fx.tech.t1 > 1.0) {
-      if (sp.state === 'run') { R.stats.techs++; evOk(); addHype(4); R.score += 500; popup('ДЕРЖИ!', C.yellow, MUS[0].x, MUS[0].foot - 140, 20); cheer(0.4); }
+      if (sp.state === 'run') { R.stats.techs++; evOk(); evHype(4); R.score += 500; popup('ДЕРЖИ!', C.yellow, MUS[0].x, MUS[0].foot - 140, 20); cheer(0.4); }
       setMute(0, false); sp.state = 'done'; fx.tech.state = 'back'; fx.tech.t1 = tr;
     }
     if (sp.state === 'done' && tr - fx.tech.t1 > 1.0) { R.strap = null; fx.tech = null; }
@@ -1881,12 +1884,12 @@ function songTap(p, pid, lag) {
     const f = fanAt(p); if (f) { kickFan(f); return; }
     if (techAt(p)) { sendTech(); return; }
     const mi0 = musicianAt(p), z = fx.zone;
-    if (z && z.state === 'wait' && mi0 === z.tgt) { z.state = 'play'; z.until = rt() + 2 * BAR; run.stats.zone++; evOk(); if (run.fh) run.fh.zone = false; addHype(6); run.score += 800; popup('ДЛЯ ВАС!', C.yellow, MUS[mi0].x, MUS[mi0].foot - 140, 22); cheer(0.9); haptic(25); return; }
+    if (z && z.state === 'wait' && mi0 === z.tgt) { z.state = 'play'; z.until = rt() + 2 * BAR; run.stats.zone++; evOk(); if (run.fh) run.fh.zone = false; evHype(6); run.score += 800; popup('ДЛЯ ВАС!', C.yellow, MUS[mi0].x, MUS[mi0].foot - 140, 22); cheer(0.9); haptic(25); return; }
     if (run.dive && run.dive.state === 'run' && mi0 === 3) { diveTap(); return; }
     const dn_ = duelNow(aT()), cb = dn_.bar, dt_ = dn_.who;
     if (dt_ >= 0) {                       // duel: left half = Ваня, right half = Витя
       const side = p.x < W / 2 ? 0 : 1;
-      if (side === dt_ && !run.duel.hits[cb]) { run.duel.hits[cb] = true; run.stats.duels++; evOk(); addHype(3); run.score += 400; popup((side === 1 ? 'ВИТЯ' : 'ВАНЯ') + ' ЖЖЁТ!', side === 1 ? C.orange : C.blue, DUEL_X[side] + (side ? -40 : 40), 200, 20); cheer(0.5); haptic(20); }
+      if (side === dt_ && !run.duel.hits[cb]) { run.duel.hits[cb] = true; run.stats.duels++; evOk(); evHype(3); run.score += 400; popup((side === 1 ? 'ВИТЯ' : 'ВАНЯ') + ' ЖЖЁТ!', side === 1 ? C.orange : C.blue, DUEL_X[side] + (side ? -40 : 40), 200, 20); cheer(0.5); haptic(20); }
       else if (side !== dt_) { popup('сейчас очередь ' + (dt_ === 1 ? 'Вити — справа' : 'Вани — слева') + '!', C.warn, W / 2, 200, 14); thudSnd(); }
       swipes.set(pid, { y: p.y, moved: false }); beatTap(p, -1, pid, false, lag); return;
     }
@@ -1902,7 +1905,7 @@ cv.addEventListener('pointermove', e => {
 const endSwipe = e => {
   const s = swipes.get(e.pointerId), off = pendingOff.get(e.pointerId);
   swipes.delete(e.pointerId); pendingOff.delete(e.pointerId);
-  if (off && run && state === 'play' && !(s && s.moved)) { const hush = inStopSilence(aT()); run.offTaps = (run.offTaps || 0) + 1; addHype(hush ? -2 : DIFF.hypeOff); breakCombo(); feedbackBad(off, hush ? 'ТССС!' : 'не в такт', hush); }
+  if (off && run && state === 'play') { const hush = inStopSilence(aT()); run.offTaps = (run.offTaps || 0) + 1; addHype(hush ? -2 : DIFF.hypeOff); breakCombo(); feedbackBad(off, hush ? 'ТССС!' : 'не в такт', hush); }
 };
 cv.addEventListener('pointerup', endSwipe); cv.addEventListener('pointercancel', e => { swipes.delete(e.pointerId); pendingOff.delete(e.pointerId); });
 document.addEventListener('touchmove', e => { if (!bandDlg.contains(e.target)) e.preventDefault(); }, { passive: false });
@@ -2612,7 +2615,8 @@ function drawEnd(tr) {
   if (r.opened) { const b = Math.abs(Math.sin(tr * 4)) * 3; rr(W / 2 - 170, 176 - b, 340, 24, 12); g.fillStyle = C.yellow; g.fill(); txt('Открыта новая песня: «' + r.opened + '»!', W / 2, 188.5 - b, FI(800, 12), '#1A0F05', 'center', 'middle'); }
   else if (r.need2) txt('Нужно 2★, чтобы открыть следующую песню', W / 2, 188, FI(600, 12), C.warn, 'center', 'middle');
   // what the stars are made of — and what was missing for the next star
-  else if (r.stars < 3) { const evOk = !r.evTotal || r.evDone >= r.evTotal * 0.8, hint = !evOk ? 'Для 3★ справляйся с событиями — фанаты, ремень, дуэль…' : r.acc < 0.8 ? 'Для 3★ тапай точнее — когда точка ровно в кольце' : 'Почти 3★ — держи хайп зала повыше';
+  else if (r.stars < 3) { const nx = r.stars + 1, needAcc = (r.m != null ? r.m : r.acc) < DIFF[nx === 3 ? 's3' : nx === 2 ? 's2' : 's1'],
+      hint = needAcc ? 'Для ' + nx + '★ попадай в аккорды — тапай, когда точка ровно в кольце' : 'Для 3★ справляйся с событиями — фанаты, ремень, дуэль…';
     txt(hint, W / 2, 188, FI(600, 12), C.warn, 'center', 'middle'); }
   const stats = [['Очки', r.score.toLocaleString('ru-RU')], ['Точность', Math.round(r.acc * 100) + '%'], ['События', r.evTotal ? Math.min(r.evDone, r.evTotal) + ' из ' + r.evTotal : '—'], ['Хайп зала', Math.round(r.hAvg != null ? r.hAvg : r.hype) + '%'], ['Макс. комбо', '×' + r.maxCombo]];
   stats.forEach(([a, b], i) => { const x = 142 + i * 140; txt(b, x, 214, '22px ' + FD, C.text, 'center', 'middle'); txt(a, x, 240, FI(600, 11), C.muted, 'center', 'middle'); });
@@ -2665,7 +2669,8 @@ function concertSongDone(r) {
 function concertCalc() {
   const C_ = CONCERT, perf = C_.res.reduce((a, r) => a + r.perf, 0) / C_.res.length;
   const info = setlistInfo(C_.list, C_.phase === 'encore' ? C_.encore : null), factor = clamp(info.W / 9, 0, 1), m = perf * factor;
-  C_.perf = perf; C_.W = info.W; C_.stars = m > 0.78 ? 3 : m > 0.58 ? 2 : m > 0.35 ? 1 : 0;
+  // same thresholds as a single song: perf is each song's rhythm score (accuracy, cut a little for missed events)
+  C_.perf = perf; C_.W = info.W; C_.stars = m >= DIFF.s3 ? 3 : m >= DIFF.s2 ? 2 : m >= DIFF.s1 ? 1 : 0;
   try { const b = +localStorage.getItem('zvukach_concert') || 0; if (C_.stars > b) localStorage.setItem('zvukach_concert', String(C_.stars)); } catch (e) {}
 }
 const slChip = k => ({ x: 22 + (k % 2) * 228, y: 60 + Math.floor(k / 2) * 60, w: 218, h: 52 });
